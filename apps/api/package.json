@@ -1,0 +1,28 @@
+{
+  "name": "@erp/api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:memory": "tsx watch src/server.ts --memory",
+    "start": "tsx src/server.ts",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node22 --sourcemap --outfile=dist/server.mjs --external:kerberos --external:snappy --external:@mongodb-js/zstd --external:@aws-sdk/credential-providers --external:gcp-metadata --external:mongodb-client-encryption --external:socks --external:aws4 \"--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
+    "start:prod": "node --enable-source-maps dist/server.mjs",
+    "seed": "tsx src/seed-cli.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@erp/db": "workspace:*",
+    "@erp/schema": "workspace:*",
+    "fastify": "^5.12.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "mongodb": "^7.7.0",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.3"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "erp",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Excel-like ERP prototype: spreadsheet grids backed by a real database",
+  "type": "module",
+  "packageManager": "pnpm@10.34.7",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d --wait mongo",
+    "db:down": "docker compose stop mongo",
+    "prod:up": "docker compose up -d --build --wait",
+    "prod:down": "docker compose down",
+    "prod:logs": "docker compose logs -f api web",
+    "seed": "pnpm --filter @erp/api seed",
+    "dev": "concurrently -n api,web -c blue,green \"pnpm --filter @erp/api dev\" \"pnpm --filter @erp/web dev\"",
+    "dev:memory": "concurrently -n api,web -c blue,green \"pnpm --filter @erp/api dev:memory\" \"pnpm --filter @erp/web dev\"",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "~5.9.3"
+  }
+}

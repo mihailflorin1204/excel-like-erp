@@ -1,0 +1,60 @@
+# Production stack: MongoDB + API + web (nginx). Start everything with:
+#   docker compose up -d --build
+# Then open http://localhost:8080 (or the WEB_PORT you set in .env).
+#
+# For development you only need the database: `pnpm db:up` starts just the mongo service.
+
+name: erp
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    # A single-node replica set: transactions (used when saving a batch) need one.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      # Only reachable from this computer (for `pnpm dev` and tools like MongoDB Compass), never from the network.
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # Initiates the replica set on first start; healthy only once this node accepts writes.
+      test: >
+        mongosh --quiet --eval "try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)"
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      target: api
+    image: erp-api
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      STORE: mongo
+      MONGO_URL: mongodb://mongo:27017/erp?replicaSet=rs0&directConnection=true
+      API_HOST: 0.0.0.0
+      API_PORT: "3001"
+      # Adds the starter items and warehouses to empty sheets. Set to "false" once you have real data.
+      SEED_ON_START: ${SEED_ON_START:-true}
+    # No ports published: only the web container talks to the API.
+
+  web:
+    build:
+      context: .
+      target: web
+    image: erp-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  mongo-data:
