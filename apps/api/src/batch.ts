@@ -5,15 +5,18 @@ import {
   type BatchError,
   type BatchResponse,
   type CellValue,
-  editableColumns,
   type ParsedBatchRequest,
   type Row,
   type SheetDef,
+  storedColumns,
   uniqueColumns,
   uniqueKey,
   validateValues,
 } from '@erp/schema';
-import { applyComputed } from './computed.ts';
+import { applyComputed, hooks } from './hooks.ts';
+import { findReferences, resolveRefs } from './references.ts';
+
+const LOCKED_MESSAGE = "Saved rows can't be changed or deleted here. Select the row and use Reverse instead.";
 
 interface PendingUpdate {
   id: string;
@@ -59,6 +62,10 @@ export async function runBatch(
   const deleting = new Set<string>();
   for (const d of req.deletes) {
     if (!once('delete', d.id)) continue;
+    if (sheet.appendOnly) {
+      errors.push({ op: 'delete', ref: d.id, message: LOCKED_MESSAGE });
+      continue;
+    }
     const current = existing.get(d.id);
     if (!current) {
       alreadyGone.push(d.id);
@@ -71,11 +78,22 @@ export async function runBatch(
     deletes.push({ id: d.id, expectedVersion: d.version });
     deleting.add(d.id);
   }
+  // A row other sheets still point at (an item with stock movements) can't be deleted.
+  const inUse = await findReferences(store, sheet.key, deletes.map((d) => d.id));
+  for (const [id, usedIn] of inUse) {
+    errors.push({ op: 'delete', ref: id, message: `Used in ${usedIn}, so it can't be deleted` });
+    deleting.delete(id);
+  }
+  const allowedDeletes = deletes.filter((d) => deleting.has(d.id));
 
   // Updates: keep valid cells, report invalid ones, drop cells that didn't change.
   const updates: PendingUpdate[] = [];
   for (const u of req.updates) {
     if (!once('update', u.id)) continue;
+    if (sheet.appendOnly) {
+      errors.push({ op: 'update', ref: u.id, message: LOCKED_MESSAGE });
+      continue;
+    }
     const current = existing.get(u.id);
     if (!current || current.version !== u.version) {
       conflicts.push({ id: u.id, current: current ?? null });
@@ -100,6 +118,22 @@ export async function runBatch(
     }
     inserts.push({ tempId: ins.tempId, values: result.values });
   }
+
+  // References: "BOLT-M8" typed in an Item column becomes that item's id.
+  const unresolved = await resolveRefs(
+    store,
+    sheet,
+    [
+      ...inserts.map((i) => ({ kind: 'insert' as const, ref: i.tempId, values: i.values })),
+      ...updates.map((u) => ({ kind: 'update' as const, ref: u.id, values: u.set })),
+    ],
+    errors,
+  );
+  inserts = inserts.filter((i) => !unresolved.has(i.tempId));
+  for (const u of updates) {
+    for (const [k, v] of Object.entries(u.set)) if ((u.current.values[k] ?? null) === v) delete u.set[k];
+  }
+
 
   // Unique columns: check against the database and within the batch. Edits to existing rows win over new rows.
   for (const column of uniqueColumns(sheet)) {
@@ -142,6 +176,15 @@ export async function runBatch(
     inserts = inserts.filter((i) => !rejectedInserts.has(i.tempId));
   }
 
+  // Module posting rules run last, on rows that passed every other check (e.g. stock movements: costing, no negative stock). They may fill system columns.
+  const beforeInsert = hooks[sheet.key]?.beforeInsert;
+  if (beforeInsert && inserts.length > 0) {
+    const ruleErrors = await beforeInsert(store, inserts);
+    errors.push(...ruleErrors);
+    const failed = new Set(ruleErrors.map((e) => e.ref));
+    inserts = inserts.filter((i) => !failed.has(i.tempId));
+  }
+
   // Build the commit.
   const audit: AuditEntry[] = [];
   const entry = (rowId: string, op: AuditEntry['op'], column: string | null, oldValue: CellValue, newValue: CellValue) =>
@@ -149,7 +192,7 @@ export async function runBatch(
 
   const insertedRows = inserts.map((i) => {
     const values: Record<string, CellValue> = {};
-    for (const c of editableColumns(sheet)) values[c.key] = i.values[c.key] ?? null;
+    for (const c of storedColumns(sheet)) values[c.key] = i.values[c.key] ?? null;
     const row: Row = { id: randomUUID(), version: 1, values, createdAt: now, updatedAt: now };
     for (const [k, v] of Object.entries(values)) if (v !== null) entry(row.id, 'insert', k, null, v);
     return { tempId: i.tempId, row };
@@ -159,7 +202,7 @@ export async function runBatch(
   for (const u of changed) {
     for (const [k, v] of Object.entries(u.set)) entry(u.id, 'update', k, u.current.values[k] ?? null, v);
   }
-  for (const d of deletes) {
+  for (const d of allowedDeletes) {
     entry(d.id, 'delete', null, JSON.stringify(existing.get(d.id)?.values ?? {}), null);
   }
 
@@ -167,7 +210,7 @@ export async function runBatch(
     sheet,
     inserts: insertedRows.map((i) => i.row),
     updates: changed.map((u) => ({ id: u.id, expectedVersion: u.current.version, set: u.set, updatedAt: now })),
-    deletes,
+    deletes: allowedDeletes,
     audit,
   });
 
@@ -195,7 +238,7 @@ export async function runBatch(
   return {
     inserted: insertedRows,
     updated: updatedRows,
-    deleted: [...deletes.filter((d) => !lateConflicts.has(d.id)).map((d) => d.id), ...alreadyGone],
+    deleted: [...allowedDeletes.filter((d) => !lateConflicts.has(d.id)).map((d) => d.id), ...alreadyGone],
     errors,
     conflicts,
   };

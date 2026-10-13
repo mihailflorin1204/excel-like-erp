@@ -126,6 +126,6 @@ describe('deletes and errors', () => {
 
   it('serves sheet definitions', async () => {
     const res = (await app.inject({ method: 'GET', url: '/api/sheets' })).json() as { sheets: { key: string }[] };
-    expect(res.sheets.map((s) => s.key)).toEqual(['items', 'warehouses']);
+    expect(res.sheets.map((s) => s.key)).toEqual(['items', 'warehouses', 'stockMovements', 'stockLevels']);
   });
 });

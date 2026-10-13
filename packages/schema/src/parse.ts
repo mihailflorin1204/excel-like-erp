@@ -3,6 +3,16 @@ import type { CellValue, ColumnDef } from './types.ts';
 export type ParseResult = { ok: true; value: CellValue } | { ok: false; error: string };
 
 /**
+ * Turns what people type in a `ref` column (a SKU, a warehouse code) into the row id it stands for, and back.
+ * The browser builds one from the referenced sheets it has loaded. Without one (on the server) the typed text
+ * is kept as is and the API resolves it.
+ */
+export interface RefLookup {
+  resolve(sheet: string, text: string): string | null;
+  display(sheet: string, id: string): string | null;
+}
+
+/**
  * Day/month order used when a typed or pasted date is ambiguous (03/04/2026).
  * 'DMY' matches Belgian and most European Excel exports; switch to 'MDY' for US data.
  */
@@ -16,7 +26,7 @@ const CURRENCY_SCALE = 2;
  * Handles both "1,234.50" and "1.234,50", currency symbols, (negatives) and European dates.
  * Required-ness is not checked here: an empty cell parses to null and the row validator decides.
  */
-export function parseCellInput(column: ColumnDef, raw: string): ParseResult {
+export function parseCellInput(column: ColumnDef, raw: string, refs?: RefLookup): ParseResult {
   const text = raw.replace(/[  ]/g, ' ').trim();
   if (text === '') return { ok: true, value: null };
 
@@ -41,6 +51,12 @@ export function parseCellInput(column: ColumnDef, raw: string): ParseResult {
       const match = column.options?.find((o) => o.toLowerCase() === text.toLowerCase());
       if (!match) return { ok: false, error: `Pick one of: ${(column.options ?? []).join(', ')}` };
       return { ok: true, value: match };
+    }
+    case 'ref': {
+      if (!refs || !column.ref) return { ok: true, value: text };
+      const id = refs.resolve(column.ref.sheet, text);
+      if (!id) return { ok: false, error: `No ${column.label.toLowerCase()} "${text}"` };
+      return { ok: true, value: id };
     }
   }
 }
@@ -111,8 +127,9 @@ export function parseDate(input: string): string | null {
 }
 
 /** How a value reads in the grid. `locale` controls number grouping and decimal marks. */
-export function formatCell(column: ColumnDef, value: CellValue, locale = 'en-US'): string {
+export function formatCell(column: ColumnDef, value: CellValue, locale = 'en-US', refs?: RefLookup): string {
   if (value === null || value === undefined) return '';
+  if (column.type === 'ref') return refText(column, value, refs);
   if (typeof value === 'number') {
     if (column.type === 'currency') {
       return value.toLocaleString(locale, { minimumFractionDigits: CURRENCY_SCALE, maximumFractionDigits: CURRENCY_SCALE });
@@ -123,8 +140,9 @@ export function formatCell(column: ColumnDef, value: CellValue, locale = 'en-US'
 }
 
 /** The text copied to the clipboard: no grouping, so Excel reads it back as a number. */
-export function copyText(column: ColumnDef, value: CellValue, locale = 'en-US'): string {
+export function copyText(column: ColumnDef, value: CellValue, locale = 'en-US', refs?: RefLookup): string {
   if (value === null || value === undefined) return '';
+  if (column.type === 'ref') return refText(column, value, refs);
   if (typeof value === 'number') {
     return value.toLocaleString(locale, {
       useGrouping: false,
@@ -134,7 +152,13 @@ export function copyText(column: ColumnDef, value: CellValue, locale = 'en-US'):
   return String(value);
 }
 
-const roundTo = (n: number, digits: number): number => {
+/** A ref shown as its display value (SKU, code); "?" if the row it points at is gone or not loaded yet. */
+function refText(column: ColumnDef, value: CellValue, refs?: RefLookup): string {
+  if (!refs || !column.ref) return String(value);
+  return refs.display(column.ref.sheet, String(value)) ?? '?';
+}
+
+export const roundTo = (n: number, digits: number): number => {
   const f = 10 ** digits;
   return Math.round((n + Number.EPSILON) * f) / f;
 };

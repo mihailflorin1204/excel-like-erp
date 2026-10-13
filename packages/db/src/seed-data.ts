@@ -20,4 +20,16 @@ export const seedData: Record<string, Record<string, CellValue>[]> = {
     { sku: 'PAINT-W-10', name: 'Wall paint white 10 l', unit: 'pcs', category: 'Chemicals', cost: 42, reorderPoint: 6 },
     { sku: 'SAND-C', name: 'Construction sand', unit: 'kg', category: 'Bulk', cost: 0.06, reorderPoint: 1000 },
   ],
+  // Items and warehouses are referenced by SKU and code; the API resolves them to ids.
+  stockMovements: [
+    { date: '2026-10-01', type: 'Receipt', item: 'BOLT-M8', warehouse: 'MAIN', qty: 40, unitCost: 6.2, reference: 'Opening stock' },
+    { date: '2026-10-01', type: 'Receipt', item: 'NUT-M8', warehouse: 'MAIN', qty: 60, unitCost: 3, reference: 'Opening stock' },
+    { date: '2026-10-01', type: 'Receipt', item: 'PIPE-CU-15', warehouse: 'MAIN', qty: 120, unitCost: 7.5, reference: 'Opening stock' },
+    { date: '2026-10-01', type: 'Receipt', item: 'CABLE-3G2.5', warehouse: 'BXL', qty: 500, unitCost: 1.8, reference: 'Opening stock' },
+    { date: '2026-10-01', type: 'Receipt', item: 'PAINT-W-10', warehouse: 'BXL', qty: 8, unitCost: 41, reference: 'Opening stock' },
+    { date: '2026-10-05', type: 'Receipt', item: 'BOLT-M8', warehouse: 'MAIN', qty: 20, unitCost: 6.8, reference: 'Supplier delivery' },
+    { date: '2026-10-06', type: 'Issue', item: 'BOLT-M8', warehouse: 'MAIN', qty: 45, reference: 'Job 1042' },
+    { date: '2026-10-07', type: 'Transfer', item: 'PIPE-CU-15', warehouse: 'MAIN', toWarehouse: 'BXL', qty: 30, reference: 'Restock Brussels' },
+    { date: '2026-10-08', type: 'Adjustment', item: 'PAINT-W-10', warehouse: 'BXL', qty: -1, reason: 'Damaged bucket' },
+  ],
 };

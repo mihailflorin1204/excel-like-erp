@@ -51,3 +51,14 @@ html, body, #root { height: 100%; margin: 0; }
 .pad { padding: 20px; }
 .hint-error { color: var(--error); }
 .sheet-error { padding: 24px; }
+
+/* Dropdown editor for enum and reference cells (the list comes from the browser's own autocomplete). */
+.list-editor input {
+  font: inherit;
+  font-size: 13px;
+  border: none;
+  outline: none;
+  min-width: 160px;
+  padding: 4px 2px;
+  background: transparent;
+}

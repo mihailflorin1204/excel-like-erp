@@ -5,7 +5,9 @@ import {
   type ColumnDef,
   copyText,
   editableColumns,
+  isReadOnlyColumn,
   parseCellInput,
+  type RefLookup,
   type Row,
   type SheetDef,
 } from '@erp/schema';
@@ -64,6 +66,9 @@ interface UndoGroup {
   removed?: { key: string; index: number; values: Record<string, CellValue>; cells: RowState['cells'] }[];
 }
 
+/** Today as YYYY-MM-DD in the user's own time zone. */
+const localToday = (): string => new Date().toLocaleDateString('sv-SE');
+
 /** Only the error states of a row's cells (pending/conflict markers don't survive an undo). */
 const errorCells = (row: RowState): RowState['cells'] =>
   Object.fromEntries(Object.entries(row.cells).filter(([, c]) => c?.state === 'error'));
@@ -92,12 +97,28 @@ export class SheetModel {
   private tempCounter = 0;
   private current: Promise<void> | null = null;
 
+  /** Columns shown in the grid, in order (hidden bookkeeping columns left out). */
+  readonly columns: readonly ColumnDef[];
+
   constructor(
     readonly sheet: SheetDef,
     private readonly api: BatchApi,
-    private readonly options: { debounceMs?: number; locale?: string } = {},
+    private readonly options: {
+      debounceMs?: number;
+      locale?: string;
+      /** Resolves typed SKUs / codes in reference columns. */
+      refs?: RefLookup;
+      /** Called after a batch saved something (e.g. to refresh other sheets that depend on this one). */
+      onSaved?: () => void;
+    } = {},
   ) {
+    this.columns = sheet.columns.filter((c) => !c.hidden);
     this.publish();
+  }
+
+  /** Saved rows of a ledger, and every row of a report, can't be edited. */
+  isLocked(row: RowState): boolean {
+    return !!this.sheet.virtual || (!!this.sheet.appendOnly && !row.draft);
   }
 
   // ---- subscription (useSyncExternalStore) ----
@@ -159,10 +180,11 @@ export class SheetModel {
     const touched = new Set<string>();
     for (const edit of edits) {
       const column = this.column(edit.column);
-      if (!column || column.computed) continue;
+      if (!column || isReadOnlyColumn(column) || this.sheet.virtual) continue;
+      if (this.rows[edit.rowIndex] && this.isLocked(this.rows[edit.rowIndex]!)) continue;
       const row = this.rowAt(edit.rowIndex);
       touched.add(row.key);
-      const parsed = parseCellInput(column, edit.raw);
+      const parsed = parseCellInput(column, edit.raw, this.options.refs);
       if (!parsed.ok) {
         row.cells[column.key] = { state: 'error', message: parsed.error, raw: edit.raw };
         this.dirty.get(row.key)?.delete(column.key);
@@ -186,7 +208,7 @@ export class SheetModel {
     const edits: CellEdit[] = [];
     block.forEach((line, r) => {
       line.forEach((raw, c) => {
-        const column = this.sheet.columns[startColumn + c];
+        const column = this.columns[startColumn + c];
         if (column) edits.push({ rowIndex: startRow + r, column: column.key, raw });
       });
     });
@@ -199,9 +221,28 @@ export class SheetModel {
     return this.rows.length - 1;
   }
 
-  deleteRows(indices: readonly number[]): void {
-    this.removeRows(new Set(indices.map((i) => this.rows[i]?.key).filter((k): k is string => !!k)));
+  /** Deletes rows; locked (posted) rows are skipped. Returns how many were skipped. */
+  deleteRows(indices: readonly number[]): number {
+    const targets = indices.map((i) => this.rows[i]).filter((r): r is RowState => !!r);
+    const allowed = targets.filter((r) => !this.isLocked(r));
+    this.removeRows(new Set(allowed.map((r) => r.key)));
     this.afterEdit();
+    return targets.length - allowed.length;
+  }
+
+  /** Merges rows the server changed or created outside a batch (e.g. by Reverse). */
+  applyRows(rows: readonly Row[]): void {
+    for (const server of rows) {
+      const row = this.rows.find((r) => r.id === server.id);
+      if (row) {
+        row.version = server.version;
+        row.values = { ...server.values };
+        row.cells = {};
+      } else {
+        this.rows.push({ key: server.id, id: server.id, version: server.version, values: { ...server.values }, cells: {}, draft: false });
+      }
+    }
+    this.publish();
   }
 
   private removeRows(keys: ReadonlySet<string>): void {
@@ -327,6 +368,9 @@ export class SheetModel {
         updates.push({ id: row.id, version: row.version, set });
         sent.set(row.key, set);
       } else if (row.draft && this.isComplete(row)) {
+        for (const c of this.sheet.columns) {
+          if (c.defaultToday && (row.values[c.key] ?? null) === null) row.values[c.key] = localToday();
+        }
         const values = Object.fromEntries(editableColumns(this.sheet).map((c) => [c.key, row.values[c.key] ?? null]));
         inserts.push({ tempId: row.key, values });
         sent.set(row.key, values);
@@ -349,6 +393,7 @@ export class SheetModel {
       const res = await this.api.batch(this.sheet.key, body);
       this.inflight = null;
       this.apply(res, sent);
+      if (res.inserted.length + res.updated.length + res.deleted.length > 0) this.options.onSaved?.();
     } catch (err) {
       // Put everything back in the queue; the user can retry.
       this.inflight = null;
@@ -411,7 +456,7 @@ export class SheetModel {
       row.cells[e.column] = {
         state: 'error',
         message: e.message,
-        raw: column ? copyText(column, value, this.options.locale) : String(value ?? ''),
+        raw: column ? copyText(column, value, this.options.locale, this.options.refs) : String(value ?? ''),
       };
     }
 
@@ -458,11 +503,11 @@ export class SheetModel {
   isComplete(row: RowState): boolean {
     if (row.rowError) return false;
     if (Object.values(row.cells).some((s) => s?.state === 'error')) return false;
-    return this.sheet.columns.every((c) => !c.required || c.computed || (row.values[c.key] ?? null) !== null);
+    return this.sheet.columns.every((c) => !c.required || isReadOnlyColumn(c) || (row.values[c.key] ?? null) !== null);
   }
 
   missingRequired(row: RowState): ColumnDef[] {
-    return this.sheet.columns.filter((c) => c.required && !c.computed && (row.values[c.key] ?? null) === null);
+    return this.sheet.columns.filter((c) => c.required && !isReadOnlyColumn(c) && (row.values[c.key] ?? null) === null);
   }
 
   dispose(): void {

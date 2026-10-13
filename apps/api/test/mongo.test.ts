@@ -79,6 +79,27 @@ describe.skipIf(!url)('MongoStore (real MongoDB)', () => {
     expect(reuse.deleted).toEqual([a!.id]);
   });
 
+  it('posts stock movements in a transaction and allows only one Reverse', async () => {
+    const setup = async (sheet: string, body: BatchRequest) =>
+      (await app.inject({ method: 'POST', url: `/api/sheets/${sheet}/batch`, payload: body })).json() as BatchResponse;
+    await setup('warehouses', { inserts: [{ tempId: 'w', values: { code: 'MT', name: 'Mongo test' } }] });
+    const moved = await setup('stockMovements', {
+      inserts: [
+        { tempId: 'r', values: { type: 'Receipt', item: 'M-0', warehouse: 'MT', qty: 10, unitCost: 2 } },
+        { tempId: 'i', values: { type: 'Issue', item: 'M-0', warehouse: 'MT', qty: 11 } },
+      ],
+    });
+    expect(moved.inserted).toHaveLength(1);
+    expect(moved.errors[0]!.message).toBe('Only 10 in stock in MT');
+
+    const id = moved.inserted[0]!.row.id;
+    const url = `/api/sheets/stockMovements/rows/${id}/actions/reverse`;
+    const results = await Promise.all([app.inject({ method: 'POST', url }), app.inject({ method: 'POST', url })]);
+    expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+    const levels = (await app.inject({ method: 'GET', url: '/api/sheets/stockLevels/rows' })).json();
+    expect(levels.rows.map((r: { values: { onHand: number } }) => r.values.onHand)).toEqual([0]);
+  });
+
   it('detects version conflicts and writes audit rows', async () => {
     const res = await batch({ inserts: [{ tempId: 'a', values: item(2000) }] });
     const id = res.inserted[0]!.row.id;

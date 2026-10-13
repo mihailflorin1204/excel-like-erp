@@ -1,6 +1,6 @@
 import { type AuditEntry, type CellValue, type Row, type RowsResponse, type SheetDef, uniqueColumns, uniqueKey } from '@erp/schema';
 import { type Db, MongoClient, MongoServerError } from 'mongodb';
-import { type CommitPlan, type CommitResult, DuplicateKeyError, type ListOptions, type SheetStore } from './store.ts';
+import { type CommitPlan, type CommitResult, ConflictError, DuplicateKeyError, type ListOptions, type SheetStore } from './store.ts';
 
 /** How a row is stored. `_u` holds lower-cased copies of unique columns so the index is case-insensitive. */
 interface RowDoc {
@@ -55,8 +55,13 @@ export class MongoStore implements SheetStore {
     this.db = this.client.db();
     for (const sheet of sheets) {
       this.sheets.set(sheet.key, sheet);
+      if (sheet.virtual) continue; // calculated on read; nothing stored
       const col = this.db.collection<RowDoc>(sheet.key);
       await col.createIndex({ seq: 1 });
+      // Reference columns are looked up constantly (e.g. all movements of an item).
+      for (const c of sheet.columns.filter((col) => col.type === 'ref' && !col.computed)) {
+        await col.createIndex({ [`values.${c.key}`]: 1 });
+      }
       for (const c of uniqueColumns(sheet)) {
         await col.createIndex(
           { [`_u.${c.key}`]: 1 },
@@ -151,6 +156,9 @@ export class MongoStore implements SheetStore {
           );
         }
 
+        // Throwing inside withTransaction aborts it: none of the writes above are kept.
+        if (plan.atomic && conflictIds.length > 0) throw new ConflictError(conflictIds);
+
         const skipped = new Set(conflictIds);
         const entries = plan.audit.filter((a) => !skipped.has(a.rowId));
         if (entries.length > 0) {
@@ -173,15 +181,11 @@ export class MongoStore implements SheetStore {
     }
   }
 
-  async sumBy(sheet: string, groupColumn: string, sumColumn: string, ids: readonly string[]): Promise<Map<string, number>> {
-    if (ids.length === 0) return new Map();
-    const out = await this.col(sheet)
-      .aggregate<{ _id: string; total: number }>([
-        { $match: { [`values.${groupColumn}`]: { $in: [...ids] } } },
-        { $group: { _id: `$values.${groupColumn}`, total: { $sum: `$values.${sumColumn}` } } },
-      ])
-      .toArray();
-    return new Map(out.map((o) => [o._id, o.total]));
+  async listWhere(sheet: string, column: string, values?: readonly string[]): Promise<Row[]> {
+    if (values && values.length === 0) return [];
+    const filter = values ? { [`values.${column}`]: { $in: [...values] } } : {};
+    const docs = await this.col(sheet).find(filter).sort({ seq: 1 }).toArray();
+    return docs.map(toRow);
   }
 
   async listAudit(sheet: string, rowId: string, limit: number): Promise<AuditEntry[]> {

@@ -1,5 +1,5 @@
 import { type AuditEntry, type Row, type RowsResponse, type SheetDef, uniqueColumns, uniqueKey } from '@erp/schema';
-import { type CommitPlan, type CommitResult, DuplicateKeyError, type ListOptions, type SheetStore } from './store.ts';
+import { type CommitPlan, type CommitResult, ConflictError, DuplicateKeyError, type ListOptions, type SheetStore } from './store.ts';
 
 const clone = <T>(v: T): T => structuredClone(v);
 
@@ -77,6 +77,8 @@ export class MemoryStore implements SheetStore {
       next.delete(d.id);
     }
 
+    if (plan.atomic && conflictIds.length > 0) throw new ConflictError(conflictIds);
+
     for (const column of uniqueColumns(plan.sheet)) {
       const seen = new Set<string>();
       for (const row of next.values()) {
@@ -93,16 +95,11 @@ export class MemoryStore implements SheetStore {
     return { conflictIds };
   }
 
-  async sumBy(sheet: string, groupColumn: string, sumColumn: string, ids: readonly string[]): Promise<Map<string, number>> {
-    const wanted = new Set(ids);
-    const sums = new Map<string, number>();
-    for (const row of this.table(sheet).values()) {
-      const group = row.values[groupColumn];
-      const amount = row.values[sumColumn];
-      if (typeof group !== 'string' || !wanted.has(group) || typeof amount !== 'number') continue;
-      sums.set(group, (sums.get(group) ?? 0) + amount);
-    }
-    return sums;
+  async listWhere(sheet: string, column: string, values?: readonly string[]): Promise<Row[]> {
+    const wanted = values ? new Set(values) : null;
+    return [...this.table(sheet).values()]
+      .filter((r) => !wanted || wanted.has(String(r.values[column] ?? '')))
+      .map(clone);
   }
 
   async listAudit(sheet: string, rowId: string, limit: number): Promise<AuditEntry[]> {

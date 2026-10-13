@@ -19,6 +19,9 @@ export const batchRequestSchema = z
   })
   .refine((b) => b.updates.length + b.inserts.length + b.deletes.length <= MAX_BATCH_OPS, {
     message: `At most ${MAX_BATCH_OPS} operations per batch`,
+  })
+  .refine((b) => new Set(b.inserts.map((i) => i.tempId)).size === b.inserts.length, {
+    message: 'Each new row needs its own tempId',
   });
 
 export type BatchRequest = z.input<typeof batchRequestSchema>;

@@ -1,4 +1,4 @@
-import type { BatchRequest, BatchResponse, RowsResponse, SheetDef } from '@erp/schema';
+import type { BatchRequest, BatchResponse, Row, RowsResponse, SheetDef } from '@erp/schema';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -17,4 +17,6 @@ export const api = {
   rows: (sheet: string) => request<RowsResponse>(`/api/sheets/${sheet}/rows?limit=10000`),
   batch: (sheet: string, body: BatchRequest) =>
     request<BatchResponse>(`/api/sheets/${sheet}/batch`, { method: 'POST', body: JSON.stringify(body) }),
+  action: (sheet: string, id: string, action: string) =>
+    request<{ rows: Row[] }>(`/api/sheets/${sheet}/rows/${id}/actions/${action}`, { method: 'POST', body: '{}' }),
 };

@@ -6,7 +6,6 @@ import { SheetView } from './SheetView.tsx';
 
 /** Sheets planned for later phases, shown greyed out so the roadmap is visible in the app. */
 const upcoming: { module: string; phase: number; sheets: string[] }[] = [
-  { module: 'Inventory', phase: 2, sheets: ['Stock movements', 'Stock levels'] },
   { module: 'Purchasing', phase: 3, sheets: ['Suppliers', 'Purchase orders', 'Goods receipts', 'Supplier bills'] },
   { module: 'Accounting', phase: 4, sheets: ['Chart of accounts', 'Journal entries', 'Trial balance'] },
   { module: 'HR', phase: 5, sheets: ['Departments', 'Employees', 'Expense claims'] },

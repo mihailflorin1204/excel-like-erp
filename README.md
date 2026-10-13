@@ -1,6 +1,6 @@
 # ERP prototype
 
-A browser ERP where every module is a spreadsheet-style grid backed by a real database: the speed of Excel with the integrity of an ERP. This is **Phase 1 (Foundation)**: the generic grid, the batch API and the audit log, shown on the Items and Warehouses sheets.
+A browser ERP where every module is a spreadsheet-style grid backed by a real database: the speed of Excel with the integrity of an ERP. Done so far: **Phase 1 (Foundation)**, the generic grid, the batch API and the audit log, and **Phase 2 (Inventory)**, which covers stock movements, stock levels, moving-average cost and reversals.
 
 ## Requirements
 
@@ -73,6 +73,31 @@ Open http://localhost:5173. The dev server reloads as you edit code. Development
 
 You can rebuild the sample with `node scripts/make-sample.mjs`.
 
+## Inventory (Phase 2)
+
+All stock comes from one ledger, **Stock movements**. Every quantity and value you see elsewhere is calculated from it.
+
+| Type | Qty | Unit cost | Rules |
+| --- | --- | --- | --- |
+| Receipt | more than 0 | Typed, or the item's *Default cost* | Adds stock |
+| Issue | more than 0 | Moving average, filled in for you | Can't take a warehouse below 0 |
+| Adjustment | + to add, − to remove | +: typed or the average; −: the average | **Reason** required (e.g. "Stock count") |
+| Transfer | more than 0 | Moving average | Fill **To warehouse**. Moves stock between warehouses without changing the item's total or value |
+
+**How to use it**
+
+- **Picking items and warehouses:** type a SKU or warehouse code, in any case, or pick from the list that appears as you type. Pasting SKUs and codes from Excel works too.
+- **Date:** if you leave it blank, today is filled in.
+- **Saved movements are locked.** To undo one, select its row by clicking the row number, then click **Reverse**. That posts an exact opposite movement, and both rows stay visible in grey.
+- **Reverse limits:** a movement can be reversed once. Reversing a receipt is refused when its stock has already been used. Post an Adjustment instead.
+- **Cost:** moving average per item, across all warehouses. Each receipt re-averages the cost, and everything that leaves stock goes out at the current average. The order of posting counts, not the date typed, so a backdated receipt doesn't re-cost earlier issues.
+
+**Where the numbers show up**
+
+- **Items:** On hand, Avg cost, Stock value and Status. Status says **Reorder** when On hand is at or below the Reorder point.
+- **Stock levels:** a read-only report of quantity and value per item and warehouse.
+- **Delete protection:** items and warehouses that have movements can't be deleted.
+
 ## What works
 
 | Feature | How |
@@ -86,14 +111,16 @@ You can rebuild the sample with `node scripts/make-sample.mjs`.
 | Conflicts | Every row has a version; if it changed elsewhere, you see the latest value highlighted in amber |
 | Undo / redo | Ctrl+Z / Ctrl+Y, and toolbar buttons. A paste is one step; undoing it removes the rows it added |
 | Audit log | One record per changed cell (who, when, old → new), written in the same transaction as the change. `GET /api/sheets/items/rows/:id/audit` |
-| Computed columns | Grey and read-only. Items · On hand is the sum of stock movements, which arrive in Phase 2, so it reads 0 for now |
+| Computed columns | Grey and read-only, calculated by the server (e.g. Items · On hand, Avg cost) |
+| Reference columns | Store the row's id, show its SKU or code, and offer a pick list in the cell editor; renaming a SKU never breaks movements |
 | Fill handle, copy, row delete | Drag the corner of a selection; Ctrl+C; select rows by their number and press Delete or **Delete row** |
 
 ## Project layout
 
 ```
 apps/web          React + Vite. SheetView (Glide Data Grid) + SheetModel (edit queue, undo, saving)
-apps/api          Fastify. Sheet routes, runBatch (validation, unique checks, audit), computed columns
+apps/api          Fastify. Sheet routes, runBatch (validation, references, unique checks, posting rules, audit)
+  src/inventory/  Stock math (balances, moving average), posting rules, Stock levels report, Reverse
 packages/schema   Sheet definitions, cell parsing, validation, API types. Shared by web and api
 packages/db       SheetStore interface, MongoStore (transactions), MemoryStore (no setup), seed data
 samples/          items-500.tsv for the paste test
@@ -101,12 +128,12 @@ deploy/           nginx.conf for the web container
 Dockerfile        Builds both images: --target api and --target web
 ```
 
-**Adding a sheet** means adding a definition in `packages/schema/src/sheets/` and listing it in `registry.ts`. The grid, API, validation and audit all pick it up. See `items.ts` for the format.
+**Adding a sheet** means adding a definition in `packages/schema/src/sheets/` and listing it in `registry.ts`. The grid, API, validation and audit all pick it up. See `items.ts` for the format. Module logic (posting rules, computed columns, reports, actions) hooks in through `apps/api/src/hooks.ts`. See `inventory/hooks.ts`.
 
 ## Tests
 
 ```powershell
-pnpm test        # 55 tests: parsing, API batch rules, and the grid model against the real API (in-memory store)
+pnpm test        # 81 tests: parsing, batch rules, inventory costing and stock checks, and the grid model against the real API
 pnpm typecheck
 ```
 
@@ -124,7 +151,10 @@ pnpm --filter @erp/api test
 | `GET /api/sheets` | Sheet definitions |
 | `GET /api/sheets/:sheet/rows?offset=&limit=` | Rows (default limit 5,000, max 10,000) |
 | `POST /api/sheets/:sheet/batch` | `{ updates, inserts, deletes }`: valid parts saved in one transaction, invalid cells returned in `errors` |
+| `POST /api/sheets/:sheet/rows/:id/actions/:action` | Row actions, e.g. `stockMovements/rows/<id>/actions/reverse` |
 | `GET /api/sheets/:sheet/rows/:id/audit` | Change history for a row |
+
+`GET /api/sheets/stockLevels/rows` returns the calculated report. In a batch, reference columns accept either an id or the display value (`"item": "BOLT-M8"`).
 
 ## Notes and limits
 
@@ -132,9 +162,11 @@ pnpm --filter @erp/api test
 - Single user (`local`) until login arrives in Phase 5.
 - All rows of a sheet are loaded at once (up to 10,000). Server-side paging and filtering come with saved views.
 - Ambiguous dates like 03/04/2026 are read as day/month (`DATE_ORDER` in `packages/schema/src/parse.ts`).
-- Undo covers cell edits and pastes, not row deletions.
+- Undo covers cell edits and pastes, not row deletions. On Stock movements, undo only works before a row saves; after that, use Reverse.
+- Stock is checked per batch against the ledger. Two people posting issues for the same item at the same moment could both pass the check. Phase 5 (multi-user) will add a stored stock table that the database checks as well.
+- Starter data is only added to a brand-new, empty database.
 - The spec named Mongoose; this uses the official MongoDB driver directly instead. Sheet definitions already describe every column, so Mongoose models would repeat them.
 
-## Next: Phase 2 (Inventory)
+## Next: Phase 3 (Purchasing)
 
-Stock movements sheet (append-only), stock levels pivot, adjustments, and reorder flags. Items · On hand then shows real numbers.
+Suppliers, purchase orders with line grids, and goods receipts that post Receipt movements automatically, plus supplier bills. Items will also get an *On order* column.

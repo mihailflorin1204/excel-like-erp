@@ -7,6 +7,16 @@ export interface CommitPlan {
   updates: { id: string; expectedVersion: number; set: Record<string, CellValue>; updatedAt: string }[];
   deletes: { id: string; expectedVersion: number }[];
   audit: AuditEntry[];
+  /** All or nothing: if any update or delete hits a changed row, save nothing and throw ConflictError. */
+  atomic?: boolean;
+}
+
+/** An atomic commit found a row changed since it was read. Nothing was saved. */
+export class ConflictError extends Error {
+  constructor(public readonly ids: string[]) {
+    super('Rows changed since they were read');
+    this.name = 'ConflictError';
+  }
 }
 
 export interface CommitResult {
@@ -42,8 +52,8 @@ export interface SheetStore {
   /** Rows whose unique column matches any of the keys (lower-cased text, see uniqueKey). */
   findByUnique(sheet: string, column: string, keys: readonly string[]): Promise<Row[]>;
   commit(plan: CommitPlan): Promise<CommitResult>;
-  /** Sum of `sumColumn` grouped by `groupColumn`, limited to the given group ids. */
-  sumBy(sheet: string, groupColumn: string, sumColumn: string, ids: readonly string[]): Promise<Map<string, number>>;
+  /** Rows whose `column` equals any of `values`, in insertion order. Omit `values` for every row of the sheet. */
+  listWhere(sheet: string, column: string, values?: readonly string[]): Promise<Row[]>;
   listAudit(sheet: string, rowId: string, limit: number): Promise<AuditEntry[]>;
   isEmpty(sheet: string): Promise<boolean>;
   close(): Promise<void>;

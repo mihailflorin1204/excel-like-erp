@@ -32,7 +32,7 @@ export function validateValues(
       errors.push({ column: key, message: 'Unknown column' });
       continue;
     }
-    if (column.computed) {
+    if (column.computed || column.system) {
       errors.push({ column: key, message: 'Read-only column' });
       continue;
     }
@@ -68,7 +68,7 @@ export function validateValues(
 
   if (mode === 'insert') {
     for (const column of sheet.columns) {
-      if (column.required && !column.computed && !(column.key in input)) {
+      if (column.required && !column.computed && !column.system && !(column.key in input)) {
         errors.push({ column: column.key, message: 'Required' });
       }
     }
