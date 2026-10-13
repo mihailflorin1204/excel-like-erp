@@ -136,6 +136,11 @@ describe('deletes and errors', () => {
       'purchaseOrderLines',
       'goodsReceipts',
       'supplierBills',
+      'supplierPayments',
+      'accounts',
+      'journalEntries',
+      'journalLines',
+      'trialBalance',
     ]);
   });
 });

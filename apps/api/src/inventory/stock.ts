@@ -5,8 +5,10 @@ import { type CellValue, roundTo } from '@erp/schema';
  * - `items`: per item, total quantity and total value across all warehouses (for the moving average).
  * - `bins`: per item and warehouse, the quantity on hand.
  *
- * Moving average: every inbound movement adds qty × its unit cost to the item's value, every outbound movement
- * is costed at the average at that moment, so value / qty is always the current average cost.
+ * Moving average: every movement adds its posted `value` (rounded to cents) to the item's value, and outbound
+ * movements are costed at the average at that moment, so value / qty is always the current average cost.
+ * Because the position is the sum of the same rounded values that are posted to the Inventory account, the
+ * ledger and the stock value always agree to the cent.
  * Transfers move quantity between warehouses but don't change the item's total or its value.
  */
 export interface StockState {
@@ -39,8 +41,9 @@ export function applyMovement(state: StockState, v: Record<string, CellValue>): 
   }
   const totals = state.items.get(item) ?? { qty: 0, value: 0 };
   totals.qty = roundTo(totals.qty + signed, 6);
-  // Back at zero stock means zero value; don't let rounding leftovers distort the next average.
-  totals.value = totals.qty === 0 ? 0 : roundTo(totals.value + signed * num(v.unitCost), 6);
+  // New movements that empty an item take exactly its remaining value, so this lands on 0 by itself. The reset
+  // only matters for movements saved before that rule (they may leave a cent or two behind).
+  totals.value = totals.qty === 0 ? 0 : roundTo(totals.value + num(v.value), 6);
   state.items.set(item, totals);
 }
 

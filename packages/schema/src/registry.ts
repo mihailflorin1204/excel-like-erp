@@ -1,10 +1,12 @@
 import type { SheetDef } from './types.ts';
+import { accountsSheet, journalEntriesSheet, journalLinesSheet, trialBalanceSheet } from './sheets/accounting.ts';
 import { itemsSheet } from './sheets/items.ts';
 import {
   goodsReceiptsSheet,
   purchaseOrderLinesSheet,
   purchaseOrdersSheet,
   supplierBillsSheet,
+  supplierPaymentsSheet,
   suppliersSheet,
 } from './sheets/purchasing.ts';
 import { stockLevelsSheet } from './sheets/stock-levels.ts';
@@ -22,6 +24,11 @@ export const sheets: readonly SheetDef[] = [
   purchaseOrderLinesSheet,
   goodsReceiptsSheet,
   supplierBillsSheet,
+  supplierPaymentsSheet,
+  accountsSheet,
+  journalEntriesSheet,
+  journalLinesSheet,
+  trialBalanceSheet,
 ];
 
 export const getSheet = (key: string): SheetDef | undefined => sheets.find((s) => s.key === key);

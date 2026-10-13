@@ -514,15 +514,25 @@ export class SheetModel {
     return Object.values(row.values).every((v) => v === null || v === undefined);
   }
 
-  /** A new row is saved once every required cell has a value and no cell shows an error. */
+  /**
+   * A new row is saved once something is typed in it, every required cell has a value and no cell shows an
+   * error. (A blank row from "Add a row" is never saved, even on a sheet with no required columns.)
+   */
   isComplete(row: RowState): boolean {
-    if (row.rowError) return false;
+    if (row.rowError || this.isEmpty(row)) return false;
     if (Object.values(row.cells).some((s) => s?.state === 'error')) return false;
-    return this.sheet.columns.every((c) => !c.required || isReadOnlyColumn(c) || (row.values[c.key] ?? null) !== null);
+    return this.missingRequired(row).length === 0;
   }
 
-  missingRequired(row: RowState): ColumnDef[] {
-    return this.sheet.columns.filter((c) => c.required && !isReadOnlyColumn(c) && (row.values[c.key] ?? null) === null);
+  /** What a new row still needs before it can be saved, e.g. ["Item", "Debit or Credit"]. */
+  missingRequired(row: RowState): string[] {
+    const has = (key: string) => (row.values[key] ?? null) !== null;
+    return [
+      ...this.sheet.columns.filter((c) => c.required && !isReadOnlyColumn(c) && !has(c.key)).map((c) => c.label),
+      ...(this.sheet.requireOneOf ?? [])
+        .filter((group) => !group.some(has))
+        .map((group) => group.map((k) => this.column(k)?.label ?? k).join(' or ')),
+    ];
   }
 
   dispose(): void {

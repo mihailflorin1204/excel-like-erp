@@ -35,5 +35,7 @@ export const stockMovementsSheet = defineSheet({
     { key: 'reversedBy', label: 'Reversed by', type: 'text', system: true, hidden: true },
     // Set when another document posted this movement (e.g. "goodsReceipts"); it must be reversed from there.
     { key: 'source', label: 'Source', type: 'text', system: true, hidden: true },
+    // The journal entry this movement posted (none for transfers or zero-value movements).
+    { key: 'journalEntry', label: 'Journal entry', type: 'text', system: true, hidden: true },
   ],
 });

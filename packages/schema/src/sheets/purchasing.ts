@@ -106,22 +106,37 @@ export const goodsReceiptsSheet = defineSheet({
     { key: 'unitCost', label: 'Unit cost', type: 'currency', system: true, width: 100 },
     { key: 'value', label: 'Value', type: 'currency', system: true, width: 105 },
     { key: 'status', label: 'Status', type: 'text', computed: true, width: 90 },
-    { key: 'line', label: 'PO line', type: 'text', system: true, hidden: true },
+    { key: 'line', label: 'PO line', type: 'text', system: true, hidden: true, indexed: true },
     { key: 'movement', label: 'Stock movement', type: 'text', system: true, hidden: true },
     { key: 'reversalOf', label: 'Reversal of', type: 'text', system: true, hidden: true },
     { key: 'reversedBy', label: 'Reversed by', type: 'text', system: true, hidden: true },
   ],
 });
 
+export const BILL_STATES = ['Draft', 'Posted', 'Reversed'] as const;
+
 /**
- * Supplier invoices, matched against what was received on the PO. Accounting entries arrive in Phase 4.
+ * Supplier invoices, matched against what was received on the PO. A draft can be corrected; Post books it
+ * (Dr Goods received not invoiced / Cr Accounts payable) and locks it. Pay it in Supplier payments.
  */
 export const supplierBillsSheet = defineSheet({
   key: 'supplierBills',
   label: 'Supplier bills',
   module: 'purchasing',
-  description: 'Invoices from suppliers, per PO. Difference compares everything billed on the PO with what was received.',
+  description: 'Invoices from suppliers, per PO. Enter as draft, then Post to book it. Difference compares billed with received on the PO.',
   refreshAfterSave: true,
+  actions: [
+    { key: 'post', label: 'Post', description: 'Book the bill in the ledger (it is locked afterwards)' },
+    { key: 'payInFull', label: 'Pay in full', description: 'Record a payment, dated today, for what is still open on the bill' },
+    { key: 'reverse', label: 'Reverse', description: 'Cancel a posted bill that has no payments' },
+  ],
+  lockRule: {
+    column: 'state',
+    editableWhen: ['Draft'],
+    alwaysEditable: ['notes'],
+    deletableWhen: ['Draft'],
+    message: 'This bill is posted: only Notes can change. Use Reverse to cancel it.',
+  },
   columns: [
     { key: 'billNo', label: 'Bill no.', type: 'text', required: true, immutable: true, maxLength: 40, width: 120 },
     { key: 'po', label: 'PO', type: 'ref', required: true, immutable: true, ref: { sheet: 'purchaseOrders', display: 'number' }, width: 115 },
@@ -129,10 +144,44 @@ export const supplierBillsSheet = defineSheet({
     { key: 'date', label: 'Bill date', type: 'date', defaultToday: true, width: 110 },
     { key: 'dueDate', label: 'Due', type: 'date', computed: true, width: 110 },
     { key: 'amount', label: 'Amount', type: 'currency', required: true, min: 0, width: 110 },
+    { key: 'status', label: 'Status', type: 'text', computed: true, width: 100 },
+    { key: 'paid', label: 'Paid', type: 'currency', computed: true, width: 105 },
+    { key: 'open', label: 'Open', type: 'currency', computed: true, width: 105 },
     { key: 'notes', label: 'Notes', type: 'text', maxLength: 300, width: 180 },
     { key: 'poReceived', label: 'PO received', type: 'currency', computed: true, width: 115 },
     { key: 'poBilled', label: 'PO billed', type: 'currency', computed: true, width: 110 },
     { key: 'difference', label: 'Difference', type: 'currency', computed: true, width: 110 },
     { key: 'match', label: 'Match', type: 'text', computed: true, width: 140 },
+    // Set when posted: how much cleared Goods received not invoiced, and the rest booked as price variance.
+    { key: 'variance', label: 'Price variance', type: 'currency', system: true, width: 115 },
+    { key: 'grniCleared', label: 'GRNI cleared', type: 'currency', system: true, hidden: true },
+    { key: 'state', label: 'State', type: 'enum', options: BILL_STATES, system: true, hidden: true },
+    { key: 'journalEntry', label: 'Journal entry', type: 'text', system: true, hidden: true },
+    { key: 'reversalEntry', label: 'Reversal entry', type: 'text', system: true, hidden: true },
+  ],
+});
+
+/**
+ * Payments to suppliers against posted bills (Dr Accounts payable / Cr Bank). A ledger: saved rows are
+ * locked, mistakes are fixed with Reverse.
+ */
+export const supplierPaymentsSheet = defineSheet({
+  key: 'supplierPayments',
+  label: 'Supplier payments',
+  module: 'purchasing',
+  description: 'Money paid against posted bills. Type the supplier and its bill no. Saved rows are locked; use Reverse.',
+  appendOnly: true,
+  actions: [{ key: 'reverse', label: 'Reverse', description: 'Cancel the payment; the bill is open again' }],
+  columns: [
+    { key: 'date', label: 'Date', type: 'date', defaultToday: true, width: 110 },
+    { key: 'supplier', label: 'Supplier', type: 'ref', required: true, ref: { sheet: 'suppliers', display: 'code' }, width: 100 },
+    { key: 'billNo', label: 'Bill no.', type: 'text', required: true, maxLength: 40, width: 120 },
+    { key: 'amount', label: 'Amount', type: 'currency', required: true, width: 110 },
+    { key: 'reference', label: 'Reference', type: 'text', maxLength: 80, width: 160 },
+    { key: 'status', label: 'Status', type: 'text', computed: true, width: 90 },
+    { key: 'bill', label: 'Bill', type: 'text', system: true, hidden: true, indexed: true },
+    { key: 'journalEntry', label: 'Journal entry', type: 'text', system: true, hidden: true },
+    { key: 'reversalOf', label: 'Reversal of', type: 'text', system: true, hidden: true },
+    { key: 'reversedBy', label: 'Reversed by', type: 'text', system: true, hidden: true },
   ],
 });

@@ -58,8 +58,8 @@ export class MongoStore implements SheetStore {
       if (sheet.virtual) continue; // calculated on read; nothing stored
       const col = this.db.collection<RowDoc>(sheet.key);
       await col.createIndex({ seq: 1 });
-      // Reference columns are looked up constantly (e.g. all movements of an item).
-      for (const c of sheet.columns.filter((col) => col.type === 'ref' && !col.computed)) {
+      // Reference columns are looked up constantly (e.g. all movements of an item), and so are a few others.
+      for (const c of sheet.columns.filter((col) => (col.type === 'ref' || col.indexed) && !col.computed)) {
         await col.createIndex({ [`values.${c.key}`]: 1 });
       }
       for (const c of uniqueColumns(sheet)) {
@@ -196,6 +196,11 @@ export class MongoStore implements SheetStore {
     if (values && values.length === 0) return [];
     const filter = values ? { [`values.${column}`]: { $in: [...values] } } : {};
     const docs = await this.col(sheet).find(filter).sort({ seq: 1 }).toArray();
+    return docs.map(toRow);
+  }
+
+  async listWithout(sheet: string, column: string): Promise<Row[]> {
+    const docs = await this.col(sheet).find({ [`values.${column}`]: { $exists: false } }).sort({ seq: 1 }).toArray();
     return docs.map(toRow);
   }
 

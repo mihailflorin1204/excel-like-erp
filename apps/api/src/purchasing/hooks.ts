@@ -23,6 +23,8 @@ import {
   str,
   today,
 } from '../inventory/hooks.ts';
+import { journalFor, journalWriter, postMovementEntry } from '../accounting/posting.ts';
+import { touchPlan } from '../util.ts';
 
 const POS = 'purchaseOrders';
 const LINES = 'purchaseOrderLines';
@@ -58,15 +60,16 @@ async function receivedByLine(store: SheetStore, lineIds: readonly string[]): Pr
 }
 
 /** Everything about a set of POs: their lines, what was received on each line, and what was billed. */
-async function loadOrders(store: SheetStore, poIds: readonly string[]) {
+export async function loadOrders(store: SheetStore, poIds: readonly string[]) {
   const pos = byId(await store.getRows(POS, poIds));
   const lines = poIds.length ? await store.listWhere(LINES, 'po', poIds) : [];
   const received = await receivedByLine(store, lines.map((l) => l.id));
-  const bills = poIds.length ? await store.listWhere(BILLS, 'po', poIds) : [];
+  // Reversed bills no longer count as billed.
+  const bills = (poIds.length ? await store.listWhere(BILLS, 'po', poIds) : []).filter((b) => b.values.state !== 'Reversed');
   return { pos, lines, linesByPo: groupBy(lines, 'po'), received, billsByPo: groupBy(bills, 'po') };
 }
 
-const lineOutstanding = (line: Row, received: Map<string, { qty: number }>) =>
+export const lineOutstanding = (line: Row, received: Map<string, { qty: number }>) =>
   roundTo((num(line.values.qty) ?? 0) - (received.get(line.id)?.qty ?? 0), 6);
 
 function poStatus(state: string, ordered: number, receivedQty: number): string {
@@ -308,14 +311,24 @@ export const purchasingHooks: Record<string, SheetHooks> = {
           errors.push({ op: 'update', ref: u.id, column: 'item', message: "That item is already on this PO; change that line's qty instead" });
         }
       }
-      touchPos(ctx, await store.getRows(POS, poIds));
+      // The state checked here is the version bumped, so a Send that lands in between makes this save conflict.
+      const pos = await store.getRows(POS, poIds);
+      const draft = new Set(pos.filter((p) => p.values.state === 'Draft').map((p) => p.id));
+      for (const u of updates) {
+        if (!draft.has(String(u.current.values.po))) errors.push({ op: 'update', ref: u.id, message: 'The PO has been sent, so its lines are locked.' });
+      }
+      touchPos(ctx, pos);
       return errors;
     },
 
     async beforeDelete(store, rows, ctx) {
       // Deleting a line also counts as changing its (draft) PO, so it can't race with Send.
-      touchPos(ctx, await store.getRows(POS, ids(rows, 'po')));
-      return [];
+      const pos = await store.getRows(POS, ids(rows, 'po'));
+      const draft = new Set(pos.filter((p) => p.values.state === 'Draft').map((p) => p.id));
+      touchPos(ctx, pos);
+      return rows
+        .filter((r) => !draft.has(String(r.values.po)))
+        .map((r) => ({ op: 'delete' as const, ref: r.id, message: 'The PO has been sent, so its lines are locked.' }));
     },
 
     async computed(store, rows) {
@@ -419,6 +432,13 @@ export const purchasingHooks: Record<string, SheetHooks> = {
       for (const e of movementErrors) errors.push({ ...e, column: e.column === 'unitCost' ? 'qty' : e.column });
       const failed = new Set(movementErrors.map((e) => e.ref));
       const ok = accepted.filter((a) => !failed.has(a.ins.tempId));
+      if (ok.length > 0) {
+        // Dr Inventory / Cr Goods received not invoiced, per receipt, saved only if the receipt is.
+        const journal = await journalFor(store, ctx);
+        for (const a of ok) {
+          postMovementEntry(journal, a.movement.values, { id: a.movementId, keepIfTempId: a.ins.tempId, sku: str(items.get(String(a.ins.values.item))?.values.sku) });
+        }
+      }
 
       ctx.related.push((idsByTempId): CommitPlan => {
         const rows: Row[] = ok
@@ -451,9 +471,24 @@ export const purchasingHooks: Record<string, SheetHooks> = {
         if (str(o.reversalOf)) throw new ActionError(409, 'This is a reversal; post a new receipt instead');
         const [movement] = await store.getRows(MOVEMENTS, [String(o.movement)]);
         if (!movement) throw new ActionError(409, "This receipt's stock movement is missing");
+        // Posted bills have cleared Goods received not invoiced for what was received; taking back goods that
+        // are already billed would leave that account wrong, so the bill must be reversed first.
+        const poId = String(o.po);
+        const { pos, linesByPo, received, billsByPo } = await loadOrders(store, [poId]);
+        const po = pos.get(poId);
+        const receivedValue = (linesByPo.get(poId) ?? []).reduce((sum, l) => sum + (received.get(l.id)?.value ?? 0), 0);
+        const postedBills = (billsByPo.get(poId) ?? []).filter((b) => b.values.state === 'Posted');
+        const cleared = postedBills.reduce((sum, b) => sum + (num(b.values.grniCleared) ?? 0), 0);
+        if (cleared > money(receivedValue - (num(o.value) ?? 0)) + 0.005) {
+          throw new ActionError(
+            409,
+            `This receipt is already billed (${postedBills.map((b) => b.values.billNo).join(', ')}). Reverse the bill first, or post a stock adjustment instead.`,
+          );
+        }
 
         const ctx = postingContext(user);
-        const stock = await planMovementReversal(store, movement, ctx, GR_SOURCE);
+        const journal = await journalWriter(store, ctx);
+        const stock = await planMovementReversal(store, movement, ctx, GR_SOURCE, journal);
         const reversal: Row = {
           id: randomUUID(),
           version: 1,
@@ -477,71 +512,12 @@ export const purchasingHooks: Record<string, SheetHooks> = {
           deletes: [],
           audit: [...insertAudit(ctx, RECEIPTS, reversal), auditEntry(ctx, RECEIPTS, original.id, 'update', 'reversedBy', null, reversal.id)],
           atomic: true,
-          related: [stock.plan],
+          // Bumping the PO makes a bill being posted on it at the same moment conflict.
+          related: [stock.plan, ...(po ? [touchPlan(purchaseOrdersSheet, [po], ctx.now)] : []), ...journal.plans()],
         });
         const updated: Row = { ...original, version: original.version + 1, updatedAt: ctx.now, values: { ...o, reversedBy: reversal.id } };
         return [updated, reversal];
       },
-    },
-  },
-
-  supplierBills: {
-    /** Bills need a sent PO, a positive amount, and a bill number not already entered for that supplier. */
-    async beforeInsert(store, inserts) {
-      const errors: BatchError[] = [];
-      const pos = byId(await store.getRows(POS, [...new Set(inserts.map((i) => String(i.values.po)))]));
-      const supplierOf = (poId: CellValue | undefined) => String(pos.get(String(poId))?.values.supplier ?? '');
-      const existing = await store.listWhere(BILLS, 'billNo');
-      const existingPos = byId(await store.getRows(POS, ids(existing, 'po')));
-      const seen = new Set(existing.map((b) => `${existingPos.get(String(b.values.po))?.values.supplier}|${uniqueKey(b.values.billNo ?? null)}`));
-
-      for (const ins of inserts) {
-        const v = ins.values;
-        const err = (column: string, message: string) => errors.push({ op: 'insert', ref: ins.tempId, column, message });
-        const po = pos.get(String(v.po))!;
-        if (po.values.state === 'Draft') {
-          err('po', `${po.values.number} is still a draft. Bills can only be entered for sent POs.`);
-          continue;
-        }
-        if ((num(v.amount) ?? 0) <= 0) {
-          err('amount', 'Must be more than 0');
-          continue;
-        }
-        const key = `${supplierOf(v.po)}|${uniqueKey(v.billNo ?? null)}`;
-        if (seen.has(key)) {
-          err('billNo', `Bill ${v.billNo} from this supplier is already entered`);
-          continue;
-        }
-        seen.add(key);
-      }
-      return errors;
-    },
-
-    async beforeUpdate(_store, updates) {
-      return updates
-        .filter((u) => 'amount' in u.set && (num(u.set.amount) ?? 0) <= 0)
-        .map((u) => ({ op: 'update' as const, ref: u.id, column: 'amount', message: 'Must be more than 0' }));
-    },
-
-    async computed(store, rows) {
-      const poIds = ids(rows, 'po');
-      const { pos, linesByPo, received, billsByPo } = await loadOrders(store, poIds);
-      const suppliers = byId(await store.getRows('suppliers', ids([...pos.values()], 'supplier')));
-      for (const r of rows) {
-        const po = pos.get(String(r.values.po));
-        const supplier = suppliers.get(String(po?.values.supplier ?? ''));
-        const poReceived = money((linesByPo.get(String(r.values.po)) ?? []).reduce((s, l) => s + (received.get(l.id)?.value ?? 0), 0));
-        const poBilled = money((billsByPo.get(String(r.values.po)) ?? []).reduce((s, b) => s + (num(b.values.amount) ?? 0), 0));
-        const difference = money(poBilled - poReceived);
-        const terms = num(supplier?.values.paymentTermsDays);
-        const date = str(r.values.date);
-        r.values.supplier = po?.values.supplier ?? null;
-        r.values.dueDate = date && terms !== null ? addDays(date, terms) : null;
-        r.values.poReceived = poReceived;
-        r.values.poBilled = poBilled;
-        r.values.difference = difference;
-        r.values.match = Math.abs(difference) < 0.005 ? 'Matched' : difference > 0 ? 'Billed > received' : 'Billed < received';
-      }
     },
   },
 };
@@ -563,7 +539,7 @@ async function itemsAfterBatch(store: SheetStore, poIds: readonly string[], ctx:
   return out;
 }
 
-function addDays(isoDate: string, days: number): string {
+export function addDays(isoDate: string, days: number): string {
   const d = new Date(`${isoDate}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);

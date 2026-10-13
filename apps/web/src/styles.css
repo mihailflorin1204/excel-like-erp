@@ -72,3 +72,12 @@ html, body, #root { height: 100%; margin: 0; }
   width: 170px;
 }
 .toolbar .filter:focus { outline: 2px solid #c7d7fe; border-color: var(--accent); }
+.toolbar .param { display: flex; gap: 6px; align-items: center; font-size: 13px; color: #4b5563; }
+.toolbar .param input {
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+.toolbar .param input:focus { outline: 2px solid #c7d7fe; border-color: var(--accent); }

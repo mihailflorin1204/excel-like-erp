@@ -34,6 +34,8 @@ export interface ColumnDef {
   integer?: boolean;
   /** Longest allowed text. Defaults to 500. */
   maxLength?: number;
+  /** Looked up often by the server (e.g. a status), so the database indexes it. Reference columns always are. */
+  indexed?: boolean;
   /** Initial column width in pixels. */
   width?: number;
 }
@@ -76,6 +78,13 @@ export interface SheetDef {
   refreshAfterSave?: boolean;
   /** A button that opens another sheet filtered on the selected rows' `column` value (e.g. a PO's lines). */
   drillDown?: { label: string; sheet: string; column: string };
+  /**
+   * Groups of columns where a new row needs a value in at least one (e.g. a journal line's Debit or Credit).
+   * The grid waits for it before saving a new row.
+   */
+  requireOneOf?: readonly (readonly string[])[];
+  /** For virtual (report) sheets: date inputs shown above the grid and sent as query parameters (e.g. from / to). */
+  params?: readonly { key: string; label: string }[];
 }
 
 /** A stored row as the API returns it. */

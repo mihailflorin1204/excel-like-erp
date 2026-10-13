@@ -14,7 +14,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   sheets: () => request<{ sheets: SheetDef[] }>('/api/sheets').then((r) => r.sheets),
-  rows: (sheet: string) => request<RowsResponse>(`/api/sheets/${sheet}/rows?limit=10000`),
+  rows: (sheet: string, params: Record<string, string> = {}) => {
+    const query = new URLSearchParams({ limit: '10000' });
+    for (const [k, v] of Object.entries(params)) if (v) query.set(k, v);
+    return request<RowsResponse>(`/api/sheets/${sheet}/rows?${query}`);
+  },
   batch: (sheet: string, body: BatchRequest) =>
     request<BatchResponse>(`/api/sheets/${sheet}/batch`, { method: 'POST', body: JSON.stringify(body) }),
   action: (sheet: string, id: string, action: string) =>

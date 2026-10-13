@@ -59,6 +59,8 @@ export interface SheetStore {
   commit(plan: CommitPlan): Promise<CommitResult>;
   /** Rows whose `column` equals any of `values`, in insertion order. Omit `values` for every row of the sheet. */
   listWhere(sheet: string, column: string, values?: readonly string[]): Promise<Row[]>;
+  /** Rows that have no `column` at all (saved before the column existed), in insertion order. */
+  listWithout(sheet: string, column: string): Promise<Row[]>;
   listAudit(sheet: string, rowId: string, limit: number): Promise<AuditEntry[]>;
   isEmpty(sheet: string): Promise<boolean>;
   close(): Promise<void>;

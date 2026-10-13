@@ -110,4 +110,30 @@ describe.skipIf(!url)('MongoStore (real MongoDB)', () => {
     const audit = (await app.inject({ method: 'GET', url: `/api/sheets/items/rows/${id}/audit` })).json();
     expect(audit.entries[0]).toMatchObject({ op: 'update', column: 'name', oldValue: 'Item 2000', newValue: 'First' });
   });
+
+  it('posts a purchase-to-payment flow to a balanced ledger, and posts a bill only once', async () => {
+    const call = async (sheet: string, body: BatchRequest) =>
+      (await app.inject({ method: 'POST', url: `/api/sheets/${sheet}/batch`, payload: body })).json() as BatchResponse;
+    const act = (sheet: string, id: string, name: string) =>
+      app.inject({ method: 'POST', url: `/api/sheets/${sheet}/rows/${id}/actions/${name}` });
+    await call('suppliers', { inserts: [{ tempId: 's', values: { code: 'MSUP', name: 'Mongo supplier' } }] });
+    const order = await call('purchaseOrders', { inserts: [{ tempId: 'p', values: { supplier: 'MSUP', warehouse: 'MT' } }] });
+    const poId = order.inserted[0]!.row.id;
+    const poNo = String(order.inserted[0]!.row.values.number);
+    await call('purchaseOrderLines', { inserts: [{ tempId: 'l', values: { po: poNo, item: 'M-1', qty: 4, unitPrice: 2.5 } }] });
+    expect((await act('purchaseOrders', poId, 'send')).statusCode).toBe(200);
+    expect((await act('purchaseOrders', poId, 'receiveAll')).statusCode).toBe(200);
+    const bills = await call('supplierBills', { inserts: [{ tempId: 'b', values: { billNo: 'MB-1', po: poNo, amount: 10 } }] });
+    const billId = bills.inserted[0]!.row.id;
+    const posts = await Promise.all([act('supplierBills', billId, 'post'), act('supplierBills', billId, 'post')]);
+    expect(posts.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+    const paid = await call('supplierPayments', { inserts: [{ tempId: 'x', values: { supplier: 'MSUP', billNo: 'MB-1', amount: 10 } }] });
+    expect(paid.errors).toEqual([]);
+
+    const tb = (await app.inject({ method: 'GET', url: '/api/sheets/trialBalance/rows' })).json();
+    const total = tb.rows.find((r: { id: string }) => r.id === 'total').values;
+    expect(total.check).toBe('Balanced');
+    const bill = (await app.inject({ method: 'GET', url: '/api/sheets/supplierBills/rows' })).json().rows[0].values;
+    expect(bill).toMatchObject({ state: 'Posted', status: 'Paid', open: 0 });
+  });
 });

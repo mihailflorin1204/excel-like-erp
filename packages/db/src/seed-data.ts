@@ -54,9 +54,12 @@ export const seedData: Record<string, Record<string, CellValue>[]> = {
     { date: '2026-10-10', po: 'PO-00001', item: 'NUT-M8', qty: 40, reference: 'DN-5531' },
   ],
   supplierBills: [{ billNo: 'F-2026-1187', po: 'PO-00001', date: '2026-10-11', amount: 772 }],
+  // seed.ts posts the bill before paying part of it.
+  supplierPayments: [{ date: '2026-10-12', supplier: 'FAST', billNo: 'F-2026-1187', amount: 500, reference: 'Bank transfer' }],
 };
 
 /** Actions run during seeding, before the sheet named in `before` is filled. */
 export const seedActions: { before: string; sheet: string; match: { column: string; value: string }; action: string }[] = [
   { before: 'goodsReceipts', sheet: 'purchaseOrders', match: { column: 'number', value: 'PO-00001' }, action: 'send' },
+  { before: 'supplierPayments', sheet: 'supplierBills', match: { column: 'billNo', value: 'F-2026-1187' }, action: 'post' },
 ];

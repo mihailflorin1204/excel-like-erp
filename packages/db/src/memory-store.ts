@@ -49,26 +49,28 @@ export class MemoryStore implements SheetStore {
   }
 
   async commit(plan: CommitPlan): Promise<CommitResult> {
-    // Work on copies so a failure leaves every table untouched, like a rolled-back transaction.
-    const primary = this.stage(plan);
+    // Work on copies so a failure leaves every table untouched, like a rolled-back transaction. Plans for the
+    // same sheet (e.g. a related write next to the primary one) are staged on top of each other, in order.
+    const staged = new Map<string, Map<string, Row>>();
+    const primary = this.stage(plan, staged);
     if (plan.atomic && primary.conflictIds.length > 0) throw new ConflictError(primary.conflictIds);
-    const related = (plan.related ?? []).map((p) => this.stage(p));
+    const related = (plan.related ?? []).map((p) => this.stage(p, staged));
     const relatedConflicts = related.flatMap((r) => r.conflictIds);
     if (relatedConflicts.length > 0) throw new ConflictError(relatedConflicts);
 
-    for (const staged of [primary, ...related]) this.tables.set(staged.plan.sheet.key, staged.next);
-    for (const staged of [primary, ...related]) {
-      const skipped = new Set(staged.conflictIds);
-      this.audit.push(...staged.plan.audit.filter((a) => !skipped.has(a.rowId)).map(clone));
+    for (const [sheet, next] of staged) this.tables.set(sheet, next);
+    for (const s of [primary, ...related]) {
+      const skipped = new Set(s.conflictIds);
+      this.audit.push(...s.plan.audit.filter((a) => !skipped.has(a.rowId)).map(clone));
     }
     return { conflictIds: primary.conflictIds };
   }
 
-  /** Applies a plan to a copy of its table and checks unique columns; nothing is saved yet. */
-  private stage(plan: CommitPlan) {
-    const next = new Map(this.table(plan.sheet.key));
+  /** Applies a plan to a copy of its table (or to what this commit already staged) and checks unique columns. */
+  private stage(plan: CommitPlan, staged: Map<string, Map<string, Row>>) {
+    const next = new Map(staged.get(plan.sheet.key) ?? this.table(plan.sheet.key));
+    staged.set(plan.sheet.key, next);
     const conflictIds: string[] = [];
-
     for (const row of plan.inserts) next.set(row.id, clone(row));
     for (const u of plan.updates) {
       const cur = next.get(u.id);
@@ -102,7 +104,7 @@ export class MemoryStore implements SheetStore {
         seen.add(k);
       }
     }
-    return { plan, next, conflictIds };
+    return { plan, conflictIds };
   }
 
   async listWhere(sheet: string, column: string, values?: readonly string[]): Promise<Row[]> {
@@ -110,6 +112,10 @@ export class MemoryStore implements SheetStore {
     return [...this.table(sheet).values()]
       .filter((r) => !wanted || wanted.has(String(r.values[column] ?? '')))
       .map(clone);
+  }
+
+  async listWithout(sheet: string, column: string): Promise<Row[]> {
+    return [...this.table(sheet).values()].filter((r) => !(column in r.values)).map(clone);
   }
 
   async listAudit(sheet: string, rowId: string, limit: number): Promise<AuditEntry[]> {

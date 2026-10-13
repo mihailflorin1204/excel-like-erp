@@ -244,7 +244,8 @@ export async function runBatch(
     entry(d.id, 'delete', null, JSON.stringify(existing.get(d.id)?.values ?? {}), null);
   }
 
-  const related: CommitPlan[] = ctx.related.map((r) => r(new Map(insertedRows.map((i) => [i.tempId, i.row.id]))));
+  const idsByTempId = new Map(insertedRows.map((i) => [i.tempId, i.row.id]));
+  const related: CommitPlan[] = ctx.related.flatMap((r) => r(idsByTempId));
   const { conflictIds } = await store.commit({
     sheet,
     inserts: insertedRows.map((i) => i.row),

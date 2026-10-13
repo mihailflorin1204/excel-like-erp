@@ -207,6 +207,7 @@ describe('seed data', () => {
       'purchaseOrderLines (5)',
       'goodsReceipts (2)',
       'supplierBills (1)',
+      'supplierPayments (1)',
     ]);
     // BOLT-M8: 40 @ 6.20 + 20 @ 6.80 = 60 @ 6.40, 45 issued → 15 @ 6.40 (96), then PO-00001 brings 100 @ 6.50.
     expect((await item('BOLT-M8')).values).toMatchObject({ onHand: 115, stockValue: 746, stockStatus: 'OK', onOrder: 0 });

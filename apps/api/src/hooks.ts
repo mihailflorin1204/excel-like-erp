@@ -1,6 +1,8 @@
 import type { CommitPlan, SheetStore } from '@erp/db';
 import type { BatchError, CellValue, Row } from '@erp/schema';
 import { inventoryHooks } from './inventory/hooks.ts';
+import { accountingHooks } from './accounting/hooks.ts';
+import { payablesHooks } from './purchasing/payables.ts';
 import { purchasingHooks } from './purchasing/hooks.ts';
 
 /** Thrown by an action (e.g. Reverse) to send a clear message back with an HTTP status. */
@@ -34,7 +36,7 @@ export interface HookContext {
    * Writes to other sheets saved in the same transaction as the batch. Each entry is called once the new rows
    * have ids, with a map from tempId to the new row's id.
    */
-  related: ((idsByTempId: Map<string, string>) => CommitPlan)[];
+  related: ((idsByTempId: Map<string, string>) => CommitPlan | CommitPlan[])[];
   /** The whole batch, so a rule can look across rows (e.g. one item per PO across edits and new rows). */
   batch: { updates: UpdateDraft[]; inserts: InsertDraft[]; deletes: Row[] };
 }
@@ -49,8 +51,8 @@ export interface SheetHooks {
   beforeUpdate?: (store: SheetStore, updates: UpdateDraft[], ctx: HookContext) => Promise<BatchError[]>;
   /** Checks on rows about to be deleted. An error keeps that row. */
   beforeDelete?: (store: SheetStore, rows: Row[], ctx: HookContext) => Promise<BatchError[]>;
-  /** Rows of a virtual (report) sheet. */
-  virtualRows?: (store: SheetStore) => Promise<Row[]>;
+  /** Rows of a virtual (report) sheet. `params` holds the sheet's declared params (e.g. from / to dates). */
+  virtualRows?: (store: SheetStore, params: Record<string, string>) => Promise<Row[]>;
   /** Row actions such as Reverse. Return the rows created or changed. */
   actions?: Record<string, (store: SheetStore, rowId: string, user: string) => Promise<Row[]>>;
 }
@@ -58,6 +60,8 @@ export interface SheetHooks {
 export const hooks: Record<string, SheetHooks> = {
   ...inventoryHooks,
   ...purchasingHooks,
+  ...payablesHooks,
+  ...accountingHooks,
 };
 
 export async function applyComputed(store: SheetStore, sheet: string, rows: Row[]): Promise<Row[]> {

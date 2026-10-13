@@ -1,17 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { type CommitPlan, ConflictError, type SheetStore } from '@erp/db';
-import { type AuditEntry, type BatchError, type CellValue, roundTo, type Row, stockMovementsSheet } from '@erp/schema';
+import { type BatchError, type CellValue, roundTo, type Row, stockMovementsSheet } from '@erp/schema';
 import { ActionError, type SheetHooks } from '../hooks.ts';
+import { auditEntry, fmtQty, insertAudit, num, type PostingContext, str, today } from '../util.ts';
+import { type JournalWriter, journalFor, journalWriter, postMovementEntry } from '../accounting/posting.ts';
 import { applyMovement, averageCost, binQty, buildStock, itemQty, type StockState } from './stock.ts';
 
 export const MOVEMENTS = 'stockMovements';
 const COST_DIGITS = 4;
 
-/** Today's date on the server, in its own time zone (the browser normally fills the date itself). */
-export const today = () => new Date().toLocaleDateString('sv-SE');
-export const str = (v: CellValue | undefined): string | null => (typeof v === 'string' && v !== '' ? v : null);
-export const num = (v: CellValue | undefined): number | null => (typeof v === 'number' ? v : null);
-export const fmtQty = (n: number) => String(roundTo(n, 6));
+export { auditEntry, fmtQty, insertAudit, num, type PostingContext, str, today } from '../util.ts';
 
 export async function stockFor(store: SheetStore, itemIds: readonly string[]): Promise<StockState> {
   return buildStock(await store.listWhere(MOVEMENTS, 'item', itemIds));
@@ -87,37 +85,21 @@ export async function postMovements(store: SheetStore, inserts: { tempId: string
     v.date = str(v.date) ?? today();
     v.unitCost = roundTo(unitCost, COST_DIGITS);
     v.signedQty = signed;
-    v.value = roundTo((type === 'Transfer' ? qty : signed) * unitCost, 2);
+    const totals = state.items.get(item);
+    if (type !== 'Transfer' && signed < 0 && totals && roundTo(totals.qty + signed, 6) === 0) {
+      // The last of the item goes out at exactly its remaining value: no rounding cents are left behind.
+      v.value = roundTo(-totals.value, 2);
+    } else {
+      v.value = roundTo((type === 'Transfer' ? qty : signed) * unitCost, 2);
+    }
     v.reversalOf = null;
     v.reversedBy = null;
     v.source = str(v.source);
+    v.journalEntry = null;
     applyMovement(state, v);
   }
   return errors;
 }
-
-/** Who is reversing, and when (shared by everything saved in one go). */
-export interface PostingContext {
-  user: string;
-  now: string;
-  batchId: string;
-}
-
-export const auditEntry = (
-  ctx: PostingContext,
-  sheet: string,
-  rowId: string,
-  op: AuditEntry['op'],
-  column: string | null,
-  oldValue: CellValue,
-  newValue: CellValue,
-): AuditEntry => ({ id: randomUUID(), sheet, rowId, op, column, oldValue, newValue, user: ctx.user, batchId: ctx.batchId, at: ctx.now });
-
-/** Audit entries for a newly created row (one per filled column). */
-export const insertAudit = (ctx: PostingContext, sheet: string, row: Row): AuditEntry[] =>
-  Object.entries(row.values)
-    .filter(([, value]) => value !== null)
-    .map(([column, value]) => auditEntry(ctx, sheet, row.id, 'insert', column, null, value));
 
 /**
  * Plans the exact opposite of a movement (same quantities and cost, opposite sign) and marks the original
@@ -128,7 +110,9 @@ export async function planMovementReversal(
   store: SheetStore,
   original: Row,
   ctx: PostingContext,
-  source: string | null = null,
+  source: string | null,
+  /** Receives the reversal of the movement's journal entry. */
+  journal: JournalWriter,
 ): Promise<{ plan: CommitPlan; reversal: Row; updated: Row }> {
   const o = original.values;
   if (str(o.reversedBy)) throw new ActionError(409, 'This movement is already reversed');
@@ -155,8 +139,9 @@ export async function planMovementReversal(
   if (o.type !== 'Transfer') {
     const totals = state.items.get(item) ?? { qty: 0, value: 0 };
     const qtyAfter = totals.qty + signed;
-    const valueAfter = totals.value + signed * (num(o.unitCost) ?? 0);
-    if (qtyAfter > 0 && valueAfter < -0.005) {
+    const valueAfter = totals.value - (num(o.value) ?? 0);
+    // Also refuse when it would empty the item but leave value behind (the ledger would keep that value).
+    if ((qtyAfter > 0 && valueAfter < -0.005) || (qtyAfter === 0 && Math.abs(valueAfter) >= 0.005)) {
       throw new ActionError(
         409,
         "Can't reverse: stock from this receipt was already used at a blended cost. Post an Adjustment instead.",
@@ -184,22 +169,44 @@ export async function planMovementReversal(
       reversalOf: original.id,
       reversedBy: null,
       source,
+      journalEntry: null,
     },
   };
+  const originalSet: Record<string, CellValue> = { reversedBy: reversal.id };
+  if (o.journalEntry === undefined) {
+    // Saved before accounting and not picked up by the backfill yet: post the original's entry now, then its
+    // reversal, so the ledger never ends up with only one of the two.
+    const sku = (await skusOf(store, [item])).get(item);
+    const entry = postMovementEntry(journal, { ...o }, { id: original.id, sku });
+    originalSet.journalEntry = entry;
+    postMovementEntry(journal, reversal.values, { id: reversal.id, sku, reversalOf: entry });
+  } else {
+    reversal.values.journalEntry = await journal.reverse(store, str(o.journalEntry), {
+      date: String(reversal.values.date),
+      origin: source === 'goodsReceipts' ? 'Goods receipt' : 'Stock movement',
+      source: MOVEMENTS,
+      sourceId: reversal.id,
+    });
+  }
   const plan: CommitPlan = {
     sheet: stockMovementsSheet,
     inserts: [reversal],
-    updates: [{ id: original.id, expectedVersion: original.version, set: { reversedBy: reversal.id }, updatedAt: ctx.now }],
+    updates: [{ id: original.id, expectedVersion: original.version, set: originalSet, updatedAt: ctx.now }],
     deletes: [],
     audit: [
       ...insertAudit(ctx, MOVEMENTS, reversal),
-      auditEntry(ctx, MOVEMENTS, original.id, 'update', 'reversedBy', null, reversal.id),
+      ...Object.entries(originalSet).map(([k, v]) => auditEntry(ctx, MOVEMENTS, original.id, 'update', k, null, v)),
     ],
     // If another request reversed it first, the original's version moved and nothing is saved.
     atomic: true,
   };
-  const updated: Row = { ...original, version: original.version + 1, updatedAt: ctx.now, values: { ...o, reversedBy: reversal.id } };
+  const updated: Row = { ...original, version: original.version + 1, updatedAt: ctx.now, values: { ...o, ...originalSet } };
   return { plan, reversal, updated };
+}
+
+export async function skusOf(store: SheetStore, itemIds: readonly string[]): Promise<Map<string, string | null>> {
+  const rows = await store.getRows('items', [...new Set(itemIds)]);
+  return new Map(rows.map((r) => [r.id, str(r.values.sku)]));
 }
 
 /** Commits a plan; a version conflict becomes a clear 409 for the user. */
@@ -215,12 +222,10 @@ export async function commitOrConflict(store: SheetStore, plan: CommitPlan): Pro
 async function reverseMovement(store: SheetStore, id: string, user: string): Promise<Row[]> {
   const [original] = await store.getRows(MOVEMENTS, [id]);
   if (!original) throw new ActionError(404, 'Movement not found');
-  const { plan, reversal, updated } = await planMovementReversal(store, original, {
-    user,
-    now: new Date().toISOString(),
-    batchId: randomUUID(),
-  });
-  await commitOrConflict(store, plan);
+  const ctx = { user, now: new Date().toISOString(), batchId: randomUUID() };
+  const journal = await journalWriter(store, ctx);
+  const { plan, reversal, updated } = await planMovementReversal(store, original, ctx, null, journal);
+  await commitOrConflict(store, { ...plan, related: journal.plans() });
   return [updated, reversal];
 }
 
@@ -244,7 +249,17 @@ export const inventoryHooks: Record<string, SheetHooks> = {
   },
 
   stockMovements: {
-    beforeInsert: postMovements,
+    /** Costs and checks the movements, then posts each one's journal entry in the same transaction. */
+    async beforeInsert(store, inserts, ctx) {
+      const errors = await postMovements(store, inserts);
+      const failed = new Set(errors.map((e) => e.ref));
+      const ok = inserts.filter((i) => !failed.has(i.tempId));
+      if (ok.length === 0) return errors;
+      const journal = await journalFor(store, ctx);
+      const skus = await skusOf(store, ok.map((i) => String(i.values.item)));
+      for (const ins of ok) postMovementEntry(journal, ins.values, { tempId: ins.tempId, sku: skus.get(String(ins.values.item)) });
+      return errors;
+    },
     async computed(_store, rows) {
       for (const r of rows) {
         r.values.status = str(r.values.reversedBy) ? 'Reversed' : str(r.values.reversalOf) ? 'Reversal' : 'Posted';

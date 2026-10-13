@@ -45,6 +45,8 @@ const emptySelection: GridSelection = {
 
 const MUTED = '#8a919c';
 
+const ATTENTION = new Set(['Reorder', 'Billed > received', 'Billed < received', 'Overdue', 'Draft · unbalanced', 'Out of balance']);
+
 const cellTheme = (
   status: CellStatus | undefined,
   column: ColumnDef,
@@ -54,8 +56,9 @@ const cellTheme = (
   if (status?.state === 'error') return { bgCell: '#fdecec', textDark: '#b42318' };
   if (status?.state === 'conflict') return { bgCell: '#fff4e0' };
   if (status?.state === 'pending') return { bgCell: '#eef4ff' };
-  // Values that ask for attention: low stock, a bill that doesn't match what was received.
-  if (value === 'Reorder' || value === 'Billed > received' || value === 'Billed < received') {
+  // Values that ask for attention: low stock, a bill that doesn't match what was received or is overdue,
+  // an entry or a trial balance that doesn't balance.
+  if (typeof value === 'string' && ATTENTION.has(value)) {
     return { bgCell: '#fff4e0', textDark: '#b45309' };
   }
   if (isReadOnlyColumn(column) && !locked) return { bgCell: '#f6f7f9', textDark: '#6b7280' };
@@ -178,7 +181,9 @@ export function SheetView({ sheet, initialQuery = '' }: { sheet: SheetDef; initi
   const refsReady = refQueries.every((q) => !q.isPending);
 
   const { model, snapshot } = useSheetModel(sheet, lookups);
-  const rowsQuery = useQuery({ queryKey: ['rows', sheet.key], queryFn: () => api.rows(sheet.key) });
+  // Report inputs such as a trial balance's From / To dates; part of the query key, so changing one reloads.
+  const [params, setParams] = useState<Record<string, string>>({});
+  const rowsQuery = useQuery({ queryKey: ['rows', sheet.key, params], queryFn: () => api.rows(sheet.key, params) });
   const [selection, setSelection] = useState<GridSelection>(emptySelection);
   const [widths, setWidths] = useState<Record<string, number>>({});
   const [notice, setNotice] = useState<{ text: string; tone: 'info' | 'error' } | null>(null);
@@ -416,6 +421,7 @@ export function SheetView({ sheet, initialQuery = '' }: { sheet: SheetDef; initi
       const row = snapshot.rows[toModel(viewRow)];
       if (!row) return undefined;
       if (row.draft) return { bgCell: '#f7fbff' };
+      if (row.id === 'total') return { bgCell: '#f1f2f5', baseFontStyle: '600 13px' };
       if (row.values.reversedBy || row.values.reversalOf) return { textDark: MUTED };
       return undefined;
     },
@@ -467,6 +473,16 @@ export function SheetView({ sheet, initialQuery = '' }: { sheet: SheetDef; initi
               setSelection(emptySelection);
             }}
           />
+          {sheet.params?.map((p) => (
+            <label key={p.key} className="param">
+              {p.label}
+              <input
+                type="date"
+                value={params[p.key] ?? ''}
+                onChange={(e) => setParams((cur) => ({ ...cur, [p.key]: e.target.value }))}
+              />
+            </label>
+          ))}
           {drillDown && (
             <button onClick={openDrillDown} disabled={selectedSaved.length === 0} title="Select rows by their number first">
               {drillDown.label}
@@ -580,7 +596,7 @@ function selectionHint(
   const cell = selection.current?.cell;
   if (!cell) {
     if (selection.rows.length > 0) return { text: `${selection.rows.length} row(s) selected.`, tone: 'info' };
-    return { text: sheet.virtual ? 'Calculated from stock movements.' : 'Select a cell to see details.', tone: 'info' };
+    return { text: sheet.virtual ? 'Calculated report · read-only.' : 'Select a cell to see details.', tone: 'info' };
   }
   const [col, viewRow] = cell;
   const row = rows[toModel(viewRow)];
@@ -590,11 +606,13 @@ function selectionHint(
   if (status?.state === 'error') return { text: `${column.label}: ${status.message}`, tone: 'error' };
   if (status?.state === 'conflict') return { text: `${column.label}: ${status.message}`, tone: 'error' };
   if (row.rowError) return { text: row.rowError, tone: 'error' };
-  if (sheet.virtual) return { text: `${column.label} is calculated from stock movements.`, tone: 'info' };
+  if (sheet.virtual) return { text: `${column.label} is calculated · read-only.`, tone: 'info' };
   if (row.draft) {
     if (column.system) return { text: `${column.label} is filled in automatically when the row is saved.`, tone: 'info' };
-    const missing = model.missingRequired(row).map((c) => c.label);
+    const missing = model.missingRequired(row);
     if (missing.length > 0) return { text: `New row: fill ${missing.join(', ')} to save it.`, tone: 'info' };
+    if (Object.values(row.cells).some((c) => c?.state === 'error')) return { text: 'New row: fix the red cells to save it.', tone: 'info' };
+    if (!model.isComplete(row)) return { text: 'New row: type something in it to save it.', tone: 'info' };
     return { text: 'New row: saving…', tone: 'info' };
   }
   if (model.isLocked(row)) {
