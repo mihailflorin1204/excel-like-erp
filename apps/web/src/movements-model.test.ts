@@ -56,14 +56,14 @@ describe('Stock movements in the grid', () => {
     s = ctx.model.getSnapshot();
     const [receipt, issue] = [s.rows[start]!, s.rows[start + 1]!];
     expect(receipt.values).toMatchObject({ date: '2026-10-12', type: 'Receipt', qty: 10, unitCost: 3.5, value: 35, status: 'Posted' });
-    // 60 @ 3.00 + 10 @ 3.50 = 70 @ 3.0714…
-    expect(issue.values.unitCost).toBeCloseTo(3.0714, 4);
+    // 60 @ 3.00 + 40 @ 3.05 (PO-00001 receipt) + 10 @ 3.50 = 110 @ 3.0636…
+    expect(issue.values.unitCost).toBeCloseTo(3.0636, 4);
     expect(ctx.saves()).toBe(1);
 
     // Posted rows ignore edits and can't be deleted.
     ctx.model.editCells([{ rowIndex: start, column: 'qty', raw: '99' }]);
     expect(ctx.model.getSnapshot().rows[start]!.values.qty).toBe(10);
-    expect(ctx.model.deleteRows([start])).toBe(1);
+    expect(ctx.model.deleteRows([start])).toHaveLength(1);
     expect(ctx.model.getSnapshot().rows).toHaveLength(start + 3);
   });
 

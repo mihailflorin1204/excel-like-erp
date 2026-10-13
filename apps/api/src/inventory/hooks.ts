@@ -1,23 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import { ConflictError, type SheetStore } from '@erp/db';
+import { type CommitPlan, ConflictError, type SheetStore } from '@erp/db';
 import { type AuditEntry, type BatchError, type CellValue, roundTo, type Row, stockMovementsSheet } from '@erp/schema';
 import { ActionError, type SheetHooks } from '../hooks.ts';
 import { applyMovement, averageCost, binQty, buildStock, itemQty, type StockState } from './stock.ts';
 
-const MOVEMENTS = 'stockMovements';
+export const MOVEMENTS = 'stockMovements';
 const COST_DIGITS = 4;
 
 /** Today's date on the server, in its own time zone (the browser normally fills the date itself). */
-const today = () => new Date().toLocaleDateString('sv-SE');
-const str = (v: CellValue | undefined): string | null => (typeof v === 'string' && v !== '' ? v : null);
-const num = (v: CellValue | undefined): number | null => (typeof v === 'number' ? v : null);
-const fmtQty = (n: number) => String(roundTo(n, 6));
+export const today = () => new Date().toLocaleDateString('sv-SE');
+export const str = (v: CellValue | undefined): string | null => (typeof v === 'string' && v !== '' ? v : null);
+export const num = (v: CellValue | undefined): number | null => (typeof v === 'number' ? v : null);
+export const fmtQty = (n: number) => String(roundTo(n, 6));
 
-async function stockFor(store: SheetStore, itemIds: readonly string[]): Promise<StockState> {
+export async function stockFor(store: SheetStore, itemIds: readonly string[]): Promise<StockState> {
   return buildStock(await store.listWhere(MOVEMENTS, 'item', itemIds));
 }
 
-async function codes(store: SheetStore, warehouseIds: readonly string[]): Promise<Map<string, string>> {
+export async function codes(store: SheetStore, warehouseIds: readonly string[]): Promise<Map<string, string>> {
   const rows = await store.getRows('warehouses', [...new Set(warehouseIds)]);
   return new Map(rows.map((r) => [r.id, String(r.values.code ?? '?')]));
 }
@@ -30,7 +30,7 @@ async function codes(store: SheetStore, warehouseIds: readonly string[]): Promis
  * - Transfer: qty > 0 from Warehouse to To warehouse at the average cost; the item's total doesn't change.
  * No warehouse may go below zero.
  */
-async function postMovements(store: SheetStore, inserts: { tempId: string; values: Record<string, CellValue> }[]) {
+export async function postMovements(store: SheetStore, inserts: { tempId: string; values: Record<string, CellValue> }[]) {
   const errors: BatchError[] = [];
   const itemIds = [...new Set(inserts.map((i) => str(i.values.item)).filter((v): v is string => !!v))];
   const state = await stockFor(store, itemIds);
@@ -90,18 +90,52 @@ async function postMovements(store: SheetStore, inserts: { tempId: string; value
     v.value = roundTo((type === 'Transfer' ? qty : signed) * unitCost, 2);
     v.reversalOf = null;
     v.reversedBy = null;
+    v.source = str(v.source);
     applyMovement(state, v);
   }
   return errors;
 }
 
-/** Reverse: a new movement that cancels the selected one exactly (same quantities and cost, opposite sign). */
-async function reverseMovement(store: SheetStore, id: string, user: string): Promise<Row[]> {
-  const [original] = await store.getRows(MOVEMENTS, [id]);
-  if (!original) throw new ActionError(404, 'Movement not found');
+/** Who is reversing, and when (shared by everything saved in one go). */
+export interface PostingContext {
+  user: string;
+  now: string;
+  batchId: string;
+}
+
+export const auditEntry = (
+  ctx: PostingContext,
+  sheet: string,
+  rowId: string,
+  op: AuditEntry['op'],
+  column: string | null,
+  oldValue: CellValue,
+  newValue: CellValue,
+): AuditEntry => ({ id: randomUUID(), sheet, rowId, op, column, oldValue, newValue, user: ctx.user, batchId: ctx.batchId, at: ctx.now });
+
+/** Audit entries for a newly created row (one per filled column). */
+export const insertAudit = (ctx: PostingContext, sheet: string, row: Row): AuditEntry[] =>
+  Object.entries(row.values)
+    .filter(([, value]) => value !== null)
+    .map(([column, value]) => auditEntry(ctx, sheet, row.id, 'insert', column, null, value));
+
+/**
+ * Plans the exact opposite of a movement (same quantities and cost, opposite sign) and marks the original
+ * as reversed. Throws ActionError when it isn't allowed. `source` must match the movement's source, so a
+ * movement posted by a goods receipt can only be reversed through that receipt.
+ */
+export async function planMovementReversal(
+  store: SheetStore,
+  original: Row,
+  ctx: PostingContext,
+  source: string | null = null,
+): Promise<{ plan: CommitPlan; reversal: Row; updated: Row }> {
   const o = original.values;
   if (str(o.reversedBy)) throw new ActionError(409, 'This movement is already reversed');
   if (str(o.reversalOf)) throw new ActionError(409, 'This is a reversal; post a new movement instead');
+  if (str(o.source) !== source) {
+    throw new ActionError(409, 'This movement was posted by a goods receipt. Reverse that receipt instead.');
+  }
 
   const item = String(o.item);
   const signed = -(num(o.signedQty) ?? 0);
@@ -130,13 +164,11 @@ async function reverseMovement(store: SheetStore, id: string, user: string): Pro
     }
   }
 
-  const now = new Date().toISOString();
-  const batchId = randomUUID();
   const reversal: Row = {
     id: randomUUID(),
     version: 1,
-    createdAt: now,
-    updatedAt: now,
+    createdAt: ctx.now,
+    updatedAt: ctx.now,
     values: {
       date: today(),
       type: o.type ?? null,
@@ -151,33 +183,44 @@ async function reverseMovement(store: SheetStore, id: string, user: string): Pro
       signedQty: signed,
       reversalOf: original.id,
       reversedBy: null,
+      source,
     },
   };
-  const audit: AuditEntry[] = [
-    ...Object.entries(reversal.values)
-      .filter(([, value]) => value !== null)
-      .map(([column, value]) => entry(reversal.id, 'insert', column, null, value)),
-    entry(original.id, 'update', 'reversedBy', null, reversal.id),
-  ];
-  function entry(rowId: string, op: AuditEntry['op'], column: string, oldValue: CellValue, newValue: CellValue): AuditEntry {
-    return { id: randomUUID(), sheet: MOVEMENTS, rowId, op, column, oldValue, newValue, user, batchId, at: now };
-  }
+  const plan: CommitPlan = {
+    sheet: stockMovementsSheet,
+    inserts: [reversal],
+    updates: [{ id: original.id, expectedVersion: original.version, set: { reversedBy: reversal.id }, updatedAt: ctx.now }],
+    deletes: [],
+    audit: [
+      ...insertAudit(ctx, MOVEMENTS, reversal),
+      auditEntry(ctx, MOVEMENTS, original.id, 'update', 'reversedBy', null, reversal.id),
+    ],
+    // If another request reversed it first, the original's version moved and nothing is saved.
+    atomic: true,
+  };
+  const updated: Row = { ...original, version: original.version + 1, updatedAt: ctx.now, values: { ...o, reversedBy: reversal.id } };
+  return { plan, reversal, updated };
+}
 
+/** Commits a plan; a version conflict becomes a clear 409 for the user. */
+export async function commitOrConflict(store: SheetStore, plan: CommitPlan): Promise<void> {
   try {
-    // Atomic: if another request reversed it first, the original's version moved and nothing is saved.
-    await store.commit({
-      sheet: stockMovementsSheet,
-      inserts: [reversal],
-      updates: [{ id: original.id, expectedVersion: original.version, set: { reversedBy: reversal.id }, updatedAt: now }],
-      deletes: [],
-      audit,
-      atomic: true,
-    });
+    await store.commit(plan);
   } catch (err) {
-    if (err instanceof ConflictError) throw new ActionError(409, 'This movement was just changed (already reversed?). Reload and check.');
+    if (err instanceof ConflictError) throw new ActionError(409, 'This was just changed (already reversed?). Reload and check.');
     throw err;
   }
-  const updated: Row = { ...original, version: original.version + 1, updatedAt: now, values: { ...o, reversedBy: reversal.id } };
+}
+
+async function reverseMovement(store: SheetStore, id: string, user: string): Promise<Row[]> {
+  const [original] = await store.getRows(MOVEMENTS, [id]);
+  if (!original) throw new ActionError(404, 'Movement not found');
+  const { plan, reversal, updated } = await planMovementReversal(store, original, {
+    user,
+    now: new Date().toISOString(),
+    batchId: randomUUID(),
+  });
+  await commitOrConflict(store, plan);
   return [updated, reversal];
 }
 
@@ -185,11 +228,14 @@ export const inventoryHooks: Record<string, SheetHooks> = {
   items: {
     async computed(store, rows) {
       const state = await stockFor(store, rows.map((r) => r.id));
+      const { onOrderByItem } = await import('../purchasing/hooks.ts');
+      const onOrder = await onOrderByItem(store, rows.map((r) => r.id));
       for (const r of rows) {
         const qty = itemQty(state, r.id);
         const average = averageCost(state, r.id);
         const reorderPoint = num(r.values.reorderPoint);
         r.values.onHand = qty;
+        r.values.onOrder = onOrder.get(r.id) ?? 0;
         r.values.avgCost = average === null ? null : roundTo(average, COST_DIGITS);
         r.values.stockValue = roundTo(state.items.get(r.id)?.value ?? 0, 2);
         r.values.stockStatus = reorderPoint === null ? null : qty <= reorderPoint ? 'Reorder' : 'OK';

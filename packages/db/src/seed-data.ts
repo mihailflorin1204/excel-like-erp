@@ -32,4 +32,31 @@ export const seedData: Record<string, Record<string, CellValue>[]> = {
     { date: '2026-10-07', type: 'Transfer', item: 'PIPE-CU-15', warehouse: 'MAIN', toWarehouse: 'BXL', qty: 30, reference: 'Restock Brussels' },
     { date: '2026-10-08', type: 'Adjustment', item: 'PAINT-W-10', warehouse: 'BXL', qty: -1, reason: 'Damaged bucket' },
   ],
+  suppliers: [
+    { code: 'FAST', name: 'Fastenix BV', contact: 'An Peeters', email: 'orders@fastenix.example', paymentTermsDays: 30 },
+    { code: 'PLUMB', name: 'Plumbex SA', contact: 'Marc Dubois', email: 'sales@plumbex.example', paymentTermsDays: 45 },
+    { code: 'ELEC', name: 'Elektro Wouters', contact: 'Sofie Wouters', paymentTermsDays: 30 },
+  ],
+  purchaseOrders: [
+    { number: 'PO-00001', supplier: 'FAST', orderDate: '2026-10-09', expectedDate: '2026-10-16', warehouse: 'MAIN', notes: 'Monthly fasteners' },
+    { number: 'PO-00002', supplier: 'PLUMB', orderDate: '2026-10-12', warehouse: 'MAIN' },
+  ],
+  purchaseOrderLines: [
+    { po: 'PO-00001', item: 'BOLT-M8', qty: 100, unitPrice: 6.5 },
+    { po: 'PO-00001', item: 'NUT-M8', qty: 100, unitPrice: 3.05 },
+    { po: 'PO-00001', item: 'WASH-M8', qty: 200, unitPrice: 2.1 },
+    { po: 'PO-00002', item: 'VALVE-BALL-15', qty: 20, unitPrice: 9.8 },
+    { po: 'PO-00002', item: 'PIPE-CU-22', qty: 60, unitPrice: 11.2 },
+  ],
+  // Goods receipts and bills need a sent PO; seed.ts sends PO-00001 before adding them.
+  goodsReceipts: [
+    { date: '2026-10-10', po: 'PO-00001', item: 'BOLT-M8', qty: 100, reference: 'DN-5531' },
+    { date: '2026-10-10', po: 'PO-00001', item: 'NUT-M8', qty: 40, reference: 'DN-5531' },
+  ],
+  supplierBills: [{ billNo: 'F-2026-1187', po: 'PO-00001', date: '2026-10-11', amount: 772 }],
 };
+
+/** Actions run during seeding, before the sheet named in `before` is filled. */
+export const seedActions: { before: string; sheet: string; match: { column: string; value: string }; action: string }[] = [
+  { before: 'goodsReceipts', sheet: 'purchaseOrders', match: { column: 'number', value: 'PO-00001' }, action: 'send' },
+];

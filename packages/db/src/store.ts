@@ -9,6 +9,11 @@ export interface CommitPlan {
   audit: AuditEntry[];
   /** All or nothing: if any update or delete hits a changed row, save nothing and throw ConflictError. */
   atomic?: boolean;
+  /**
+   * Writes to other sheets in the same transaction (e.g. a goods receipt and its stock movement).
+   * These are always all-or-nothing: a conflict in any of them saves nothing and throws ConflictError.
+   */
+  related?: CommitPlan[];
 }
 
 /** An atomic commit found a row changed since it was read. Nothing was saved. */

@@ -6,7 +6,6 @@ import { SheetView } from './SheetView.tsx';
 
 /** Sheets planned for later phases, shown greyed out so the roadmap is visible in the app. */
 const upcoming: { module: string; phase: number; sheets: string[] }[] = [
-  { module: 'Purchasing', phase: 3, sheets: ['Suppliers', 'Purchase orders', 'Goods receipts', 'Supplier bills'] },
   { module: 'Accounting', phase: 4, sheets: ['Chart of accounts', 'Journal entries', 'Trial balance'] },
   { module: 'HR', phase: 5, sheets: ['Departments', 'Employees', 'Expense claims'] },
 ];
@@ -18,14 +17,19 @@ const moduleLabel: Record<SheetDef['module'], string> = {
   hr: 'HR',
 };
 
-const sheetFromHash = () => window.location.hash.replace(/^#\/?/, '');
+/** `#/purchaseOrderLines?q=PO-00001` → sheet key and filter text. */
+const parseHash = () => {
+  const [path = '', search = ''] = window.location.hash.replace(/^#\/?/, '').split('?');
+  return { sheet: path, query: new URLSearchParams(search).get('q') ?? '' };
+};
 
 export function App() {
   const sheetsQuery = useQuery({ queryKey: ['sheets'], queryFn: api.sheets });
-  const [active, setActive] = useState(sheetFromHash);
+  const [route, setRoute] = useState(parseHash);
+  const active = route.sheet;
 
   useEffect(() => {
-    const onHash = () => setActive(sheetFromHash());
+    const onHash = () => setRoute(parseHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -71,7 +75,7 @@ export function App() {
             <button onClick={() => sheetsQuery.refetch()}>Try again</button>
           </div>
         )}
-        {current && <SheetView key={current.key} sheet={current} />}
+        {current && <SheetView key={current.key} sheet={current} initialQuery={current.key === active ? route.query : ''} />}
       </main>
     </div>
   );

@@ -20,6 +20,8 @@ export interface ColumnDef {
   system?: boolean;
   /** Kept on the row but not shown in the grid (bookkeeping fields). */
   hidden?: boolean;
+  /** Typed when the row is created, then read-only (e.g. which PO a bill belongs to). */
+  immutable?: boolean;
   /** For `date` columns: a new row left blank gets today's date (the user's local date, filled by the browser). */
   defaultToday?: boolean;
   /** For `ref` columns: the sheet it points at and the unique column people type to pick a row. */
@@ -42,6 +44,21 @@ export interface SheetAction {
   description: string;
 }
 
+/**
+ * Locks saved rows depending on one of their values (a status). The value may be computed, e.g. a PO line
+ * reads its order's status.
+ */
+export interface LockRule {
+  column: string;
+  /** Values of `column` in which the row can be edited (and deleted, unless `deletableWhen` says otherwise). */
+  editableWhen: readonly string[];
+  /** Columns that stay editable whatever the status (e.g. notes). */
+  alwaysEditable?: readonly string[];
+  deletableWhen?: readonly string[];
+  /** Shown when someone tries to change a locked row. */
+  message: string;
+}
+
 export interface SheetDef {
   key: string;
   label: string;
@@ -54,6 +71,11 @@ export interface SheetDef {
   virtual?: boolean;
   /** Buttons that act on selected saved rows. */
   actions?: readonly SheetAction[];
+  lockRule?: LockRule;
+  /** Reload this sheet after each save, because rows' computed values depend on other rows (e.g. bill totals). */
+  refreshAfterSave?: boolean;
+  /** A button that opens another sheet filtered on the selected rows' `column` value (e.g. a PO's lines). */
+  drillDown?: { label: string; sheet: string; column: string };
 }
 
 /** A stored row as the API returns it. */
@@ -79,3 +101,25 @@ export const uniqueColumns = (sheet: SheetDef): ColumnDef[] =>
   sheet.columns.filter((c) => c.unique && !c.computed);
 
 export const isReadOnlyColumn = (c: ColumnDef): boolean => !!(c.computed || c.system);
+
+/** Why a saved row's cell can't be edited, or null if it can. `values` should include computed columns. */
+export function editBlockedReason(sheet: SheetDef, values: Record<string, CellValue>, column: ColumnDef): string | null {
+  if (isReadOnlyColumn(column)) return 'Read-only column';
+  if (sheet.virtual) return 'This is a calculated report';
+  if (sheet.appendOnly) return "Saved rows can't be changed here. Select the row and use Reverse instead.";
+  if (column.immutable) return `${column.label} can't be changed after the row is saved`;
+  const rule = sheet.lockRule;
+  if (rule && !rule.alwaysEditable?.includes(column.key) && !rule.editableWhen.includes(String(values[rule.column] ?? ''))) {
+    return rule.message;
+  }
+  return null;
+}
+
+/** Why a saved row can't be deleted, or null if it can. */
+export function deleteBlockedReason(sheet: SheetDef, values: Record<string, CellValue>): string | null {
+  if (sheet.virtual) return 'This is a calculated report';
+  if (sheet.appendOnly) return "Saved rows can't be deleted here. Select the row and use Reverse instead.";
+  const rule = sheet.lockRule;
+  if (rule && !(rule.deletableWhen ?? rule.editableWhen).includes(String(values[rule.column] ?? ''))) return rule.message;
+  return null;
+}

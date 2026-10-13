@@ -54,7 +54,10 @@ const cellTheme = (
   if (status?.state === 'error') return { bgCell: '#fdecec', textDark: '#b42318' };
   if (status?.state === 'conflict') return { bgCell: '#fff4e0' };
   if (status?.state === 'pending') return { bgCell: '#eef4ff' };
-  if (value === 'Reorder') return { bgCell: '#fff4e0', textDark: '#b45309' };
+  // Values that ask for attention: low stock, a bill that doesn't match what was received.
+  if (value === 'Reorder' || value === 'Billed > received' || value === 'Billed < received') {
+    return { bgCell: '#fff4e0', textDark: '#b45309' };
+  }
   if (isReadOnlyColumn(column) && !locked) return { bgCell: '#f6f7f9', textDark: '#6b7280' };
   return undefined;
 };
@@ -76,7 +79,11 @@ function useSheetModel(sheet: SheetDef, lookups: RefLookups) {
         locale,
         refs: lookups,
         // Other sheets may show numbers that depend on this one (stock on hand, references): refresh them.
-        onSaved: () => void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'rows' && q.queryKey[1] !== sheet.key }),
+        // This sheet too when its computed columns span rows (it reloads once nothing is waiting to save).
+        onSaved: () =>
+          void queryClient.invalidateQueries({
+            predicate: (q) => q.queryKey[0] === 'rows' && (q.queryKey[1] !== sheet.key || !!sheet.refreshAfterSave),
+          }),
       }),
     [sheet, lookups, queryClient],
   );
@@ -148,7 +155,10 @@ const ListEditor: ProvideEditorComponent<TextCell> = ({ value, onChange, onFinis
   );
 };
 
-export function SheetView({ sheet }: { sheet: SheetDef }) {
+/** Splits a filter like "PO-00001, PO-00002" into lower-case terms; a row matches if any cell contains any term. */
+const filterTerms = (q: string) => q.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+
+export function SheetView({ sheet, initialQuery = '' }: { sheet: SheetDef; initialQuery?: string }) {
   const queryClient = useQueryClient();
   const lookups = useMemo(() => new RefLookups(), [sheet]);
   const targets = useMemo(() => refTargets(sheet), [sheet]);
@@ -173,11 +183,70 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
   const [widths, setWidths] = useState<Record<string, number>>({});
   const [notice, setNotice] = useState<{ text: string; tone: 'info' | 'error' } | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [query, setQuery] = useState(initialQuery);
+  // Rows edited while a filter is on stay visible until the filter changes, so the cursor never jumps.
+  const sticky = useRef(new Set<string>());
+  useEffect(() => {
+    setQuery(initialQuery);
+    setSelection(emptySelection);
+  }, [initialQuery]);
+  useEffect(() => {
+    sticky.current = new Set();
+  }, [query]);
   const readOnlySheet = !!sheet.virtual;
 
   useEffect(() => {
     if (rowsQuery.data && !model.hasUnsavedChanges) model.load(rowsQuery.data.rows);
   }, [rowsQuery.data, model]);
+
+  // Filtering: the grid shows `visible` (model row indices); new rows always stay visible. Grid rows past the
+  // end map to new rows past the end of the model, so typing or pasting below a filtered list still adds rows.
+  const visible = useMemo(() => {
+    const terms = filterTerms(query);
+    if (terms.length === 0) return null;
+    const out: number[] = [];
+    snapshot.rows.forEach((row, i) => {
+      if (row.draft || sticky.current.has(row.key)) return out.push(i);
+      const hit = model.columns.some((c) => {
+        const text = formatCell(c, row.values[c.key] ?? null, locale, lookups).toLowerCase();
+        return terms.some((t) => text.includes(t));
+      });
+      if (hit) out.push(i);
+    });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, snapshot, model, lookups, lookupVersion]);
+  const toModel = useCallback(
+    (viewRow: number) =>
+      visible ? (viewRow < visible.length ? visible[viewRow]! : snapshot.rows.length + (viewRow - visible.length)) : viewRow,
+    [visible, snapshot],
+  );
+  const viewRowCount = visible ? visible.length : snapshot.rows.length;
+  const pin = useCallback(
+    (modelRows: readonly number[]) => {
+      if (!visible) return;
+      for (const i of modelRows) {
+        const key = snapshot.rows[i]?.key;
+        if (key) sticky.current.add(key);
+      }
+    },
+    [visible, snapshot],
+  );
+  const pasteBlock = useCallback(
+    (startCol: number, startRow: number, block: readonly (readonly string[])[]) => {
+      const edits = block.flatMap((line, r) =>
+        line.flatMap((raw, c) => {
+          const column = model.columns[startCol + c];
+          return column ? [{ rowIndex: toModel(startRow + r), column: column.key, raw }] : [];
+        }),
+      );
+      pin(edits.map((e) => e.rowIndex));
+      model.editCells(edits);
+    },
+    [model, toModel, pin],
+  );
+  const pasteRef = useRef(pasteBlock);
+  pasteRef.current = pasteBlock;
 
   // A cell editor is open (e.g. after clicking "Add a row") and Excel data is pasted: Glide would put the
   // whole block into that one cell. Send it to the grid instead, starting at the cell being edited.
@@ -193,7 +262,7 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
       e.preventDefault();
       e.stopPropagation();
       (e.target as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      model.paste(cell[0], cell[1], parseTsv(text));
+      pasteRef.current(cell[0], cell[1], parseTsv(text));
     };
     document.addEventListener('paste', onPaste, true);
     return () => document.removeEventListener('paste', onPaste, true);
@@ -211,12 +280,12 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
   );
 
   const getCellContent = useCallback(
-    ([col, rowIndex]: Item): GridCell => {
+    ([col, viewRow]: Item): GridCell => {
       const column = model.columns[col]!;
-      const row = snapshot.rows[rowIndex];
+      const row = snapshot.rows[toModel(viewRow)];
       const status = row?.cells[column.key];
       const value = row?.values[column.key] ?? null;
-      const locked = !row || model.isLocked(row) || isReadOnlyColumn(column);
+      const locked = row ? model.blockedReason(row, column) !== null : isReadOnlyColumn(column);
       const shown = status?.state === 'error' ? status.raw : formatCell(column, value, locale, lookups);
       return {
         kind: GridCellKind.Text,
@@ -231,7 +300,7 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
     },
     // lookupVersion: repaint when a referenced sheet loads, so ids turn into SKUs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [model, snapshot, lookups, lookupVersion],
+    [model, snapshot, lookups, lookupVersion, toModel],
   );
 
   const provideEditor = useCallback<ProvideEditorCallback<GridCell>>(
@@ -253,37 +322,37 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
 
   const onCellsEdited = useCallback(
     (edits: readonly { location: Item; value: EditableGridCell }[]) => {
-      model.editCells(
-        edits.map(({ location: [col, row], value }) => ({
-          rowIndex: row,
-          column: model.columns[col]!.key,
-          raw: value.kind === GridCellKind.Text ? value.data : '',
-        })),
-      );
+      const mapped = edits.map(({ location: [col, row], value }) => ({
+        rowIndex: toModel(row),
+        column: model.columns[col]!.key,
+        raw: value.kind === GridCellKind.Text ? value.data : '',
+      }));
+      pin(mapped.map((e) => e.rowIndex));
+      model.editCells(mapped);
       return true;
     },
-    [model],
+    [model, toModel, pin],
   );
 
   const onPaste = useCallback(
     ([col, row]: Item, values: readonly (readonly string[])[]) => {
-      model.paste(col, row, values);
+      pasteBlock(col, row, values);
       return false; // handled: the model parses, validates and adds rows past the end
     },
-    [model],
+    [pasteBlock],
   );
 
   const deleteRows = useCallback(
-    (indices: number[]) => {
-      const skipped = model.deleteRows(indices);
+    (viewRows: number[]) => {
+      const skipped = model.deleteRows(viewRows.map(toModel));
       setSelection(emptySelection);
       setNotice(
-        skipped > 0
-          ? { text: `${skipped} saved row${skipped > 1 ? 's' : ''} can't be deleted. Use ${sheet.actions?.[0]?.label ?? 'an action'} instead.`, tone: 'error' }
+        skipped.length > 0
+          ? { text: `${skipped.length} row${skipped.length > 1 ? 's' : ''} not deleted: ${skipped[0]}`, tone: 'error' }
           : null,
       );
     },
-    [model, sheet],
+    [model, toModel],
   );
 
   const onDelete = useCallback(
@@ -301,7 +370,7 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
     async (action: { key: string; label: string }) => {
       const targets = selection.rows
         .toArray()
-        .map((i) => snapshot.rows[i])
+        .map((i) => snapshot.rows[toModel(i)])
         .filter((r): r is RowState => !!r?.id);
       if (targets.length === 0) return;
       setBusyAction(action.key);
@@ -324,7 +393,7 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
           : { text: `${action.label}: ${done} row${done > 1 ? 's' : ''} done.`, tone: 'info' },
       );
     },
-    [model, queryClient, selection, sheet, snapshot],
+    [model, queryClient, selection, sheet, snapshot, toModel],
   );
 
   const onKeyDown = useCallback(
@@ -343,19 +412,26 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
   );
 
   const getRowThemeOverride = useCallback(
-    (rowIndex: number): Partial<Theme> | undefined => {
-      const row = snapshot.rows[rowIndex];
+    (viewRow: number): Partial<Theme> | undefined => {
+      const row = snapshot.rows[toModel(viewRow)];
       if (!row) return undefined;
       if (row.draft) return { bgCell: '#f7fbff' };
       if (row.values.reversedBy || row.values.reversalOf) return { textDark: MUTED };
       return undefined;
     },
-    [snapshot],
+    [snapshot, toModel],
   );
 
   const selectedRows = selection.rows.toArray();
+  const selectedSaved = selectedRows.map((i) => snapshot.rows[toModel(i)]).filter((r): r is RowState => !!r?.id);
   const status = readOnlySheet ? { text: 'Calculated · read-only', tone: 'ok' as const } : statusText(snapshot);
-  const hint = notice ?? selectionHint(model, snapshot.rows, selection);
+  const hint = notice ?? selectionHint(model, snapshot.rows, selection, toModel);
+  const drillDown = sheet.drillDown;
+  const openDrillDown = () => {
+    if (!drillDown) return;
+    const values = selectedSaved.map((r) => String(r.values[drillDown.column] ?? '')).filter(Boolean);
+    window.location.hash = `#/${drillDown.sheet}?q=${encodeURIComponent(values.join(', '))}`;
+  };
 
   if (rowsQuery.isError) {
     return (
@@ -380,6 +456,22 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
             {status.text}
           </span>
           {snapshot.lastError && <button onClick={() => void model.flush()}>Retry</button>}
+          <input
+            className="filter"
+            type="search"
+            placeholder="Filter…"
+            title="Show rows containing this text. Separate several with commas."
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSelection(emptySelection);
+            }}
+          />
+          {drillDown && (
+            <button onClick={openDrillDown} disabled={selectedSaved.length === 0} title="Select rows by their number first">
+              {drillDown.label}
+            </button>
+          )}
           {!readOnlySheet && (
             <>
               <button onClick={() => model.undo()} disabled={!snapshot.canUndo} title="Undo (Ctrl+Z)">
@@ -392,7 +484,7 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
                 <button
                   key={a.key}
                   title={`${a.description}. Select rows by their number first.`}
-                  disabled={busyAction !== null || selectedRows.every((i) => !snapshot.rows[i]?.id)}
+                  disabled={busyAction !== null || selectedSaved.length === 0}
                   onClick={() => void runAction(a)}
                 >
                   {busyAction === a.key ? `${a.label}…` : a.label}
@@ -419,7 +511,7 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
         ) : (
           <DataEditor
             columns={columns}
-            rows={snapshot.rows.length}
+            rows={viewRowCount}
             getCellContent={getCellContent}
             provideEditor={provideEditor}
             onCellsEdited={readOnlySheet ? undefined : onCellsEdited}
@@ -455,6 +547,7 @@ export function SheetView({ sheet }: { sheet: SheetDef }) {
       <footer className="sheet-footer">
         <span className={hint.tone === 'error' ? 'hint-error' : 'muted'}>{hint.text}</span>
         <span className="muted">
+          {visible ? `${visible.length.toLocaleString(locale)} of ` : ''}
           {snapshot.rows.length.toLocaleString(locale)} rows
           {readOnlySheet ? '' : ' · paste from Excel with Ctrl+V · Ctrl+Z to undo'}
         </span>
@@ -481,6 +574,7 @@ function selectionHint(
   model: SheetModel,
   rows: readonly RowState[],
   selection: GridSelection,
+  toModel: (viewRow: number) => number,
 ): { text: string; tone: 'info' | 'error' } {
   const { sheet } = model;
   const cell = selection.current?.cell;
@@ -488,8 +582,8 @@ function selectionHint(
     if (selection.rows.length > 0) return { text: `${selection.rows.length} row(s) selected.`, tone: 'info' };
     return { text: sheet.virtual ? 'Calculated from stock movements.' : 'Select a cell to see details.', tone: 'info' };
   }
-  const [col, rowIndex] = cell;
-  const row = rows[rowIndex];
+  const [col, viewRow] = cell;
+  const row = rows[toModel(viewRow)];
   const column = model.columns[col];
   if (!row || !column) return { text: '', tone: 'info' };
   const status = row.cells[column.key];
@@ -504,11 +598,13 @@ function selectionHint(
     return { text: 'New row: saving…', tone: 'info' };
   }
   if (model.isLocked(row)) {
-    if (row.values.reversedBy) return { text: 'This movement was reversed.', tone: 'info' };
-    if (row.values.reversalOf) return { text: 'This movement reverses an earlier one.', tone: 'info' };
+    if (row.values.reversedBy) return { text: 'This row was reversed.', tone: 'info' };
+    if (row.values.reversalOf) return { text: 'This row reverses an earlier one.', tone: 'info' };
     return { text: 'Posted and locked. To cancel it, select the row by its number and click Reverse.', tone: 'info' };
   }
   if (column.computed || column.system) return { text: `${column.label} is calculated by the system and can't be edited.`, tone: 'info' };
+  const blocked = model.blockedReason(row, column);
+  if (blocked) return { text: blocked, tone: 'info' };
   if (column.type === 'ref') return { text: `${column.label}: type a ${column.ref?.display ?? 'value'} or pick from the list.`, tone: 'info' };
   return {
     text: `${column.label} · ${column.type}${column.required ? ' · required' : ''}${column.unique ? ' · unique' : ''}`,

@@ -49,7 +49,23 @@ export class MemoryStore implements SheetStore {
   }
 
   async commit(plan: CommitPlan): Promise<CommitResult> {
-    // Work on a copy so a failed unique check leaves the table untouched, like a rolled-back transaction.
+    // Work on copies so a failure leaves every table untouched, like a rolled-back transaction.
+    const primary = this.stage(plan);
+    if (plan.atomic && primary.conflictIds.length > 0) throw new ConflictError(primary.conflictIds);
+    const related = (plan.related ?? []).map((p) => this.stage(p));
+    const relatedConflicts = related.flatMap((r) => r.conflictIds);
+    if (relatedConflicts.length > 0) throw new ConflictError(relatedConflicts);
+
+    for (const staged of [primary, ...related]) this.tables.set(staged.plan.sheet.key, staged.next);
+    for (const staged of [primary, ...related]) {
+      const skipped = new Set(staged.conflictIds);
+      this.audit.push(...staged.plan.audit.filter((a) => !skipped.has(a.rowId)).map(clone));
+    }
+    return { conflictIds: primary.conflictIds };
+  }
+
+  /** Applies a plan to a copy of its table and checks unique columns; nothing is saved yet. */
+  private stage(plan: CommitPlan) {
     const next = new Map(this.table(plan.sheet.key));
     const conflictIds: string[] = [];
 
@@ -77,8 +93,6 @@ export class MemoryStore implements SheetStore {
       next.delete(d.id);
     }
 
-    if (plan.atomic && conflictIds.length > 0) throw new ConflictError(conflictIds);
-
     for (const column of uniqueColumns(plan.sheet)) {
       const seen = new Set<string>();
       for (const row of next.values()) {
@@ -88,11 +102,7 @@ export class MemoryStore implements SheetStore {
         seen.add(k);
       }
     }
-
-    this.tables.set(plan.sheet.key, next);
-    const skipped = new Set(conflictIds);
-    this.audit.push(...plan.audit.filter((a) => !skipped.has(a.rowId)).map(clone));
-    return { conflictIds };
+    return { plan, next, conflictIds };
   }
 
   async listWhere(sheet: string, column: string, values?: readonly string[]): Promise<Row[]> {

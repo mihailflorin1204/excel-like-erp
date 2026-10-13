@@ -33,5 +33,7 @@ export const stockMovementsSheet = defineSheet({
     { key: 'signedQty', label: 'Signed qty', type: 'number', system: true, hidden: true },
     { key: 'reversalOf', label: 'Reversal of', type: 'text', system: true, hidden: true },
     { key: 'reversedBy', label: 'Reversed by', type: 'text', system: true, hidden: true },
+    // Set when another document posted this movement (e.g. "goodsReceipts"); it must be reversed from there.
+    { key: 'source', label: 'Source', type: 'text', system: true, hidden: true },
   ],
 });

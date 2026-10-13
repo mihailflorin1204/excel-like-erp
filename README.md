@@ -1,6 +1,10 @@
 # ERP prototype
 
-A browser ERP where every module is a spreadsheet-style grid backed by a real database: the speed of Excel with the integrity of an ERP. Done so far: **Phase 1 (Foundation)**, the generic grid, the batch API and the audit log, and **Phase 2 (Inventory)**, which covers stock movements, stock levels, moving-average cost and reversals.
+A browser ERP where every module is a spreadsheet-style grid backed by a real database: the speed of Excel with the integrity of an ERP. Done so far:
+
+- **Phase 1 (Foundation):** the generic grid, the batch API and the audit log.
+- **Phase 2 (Inventory):** stock movements, stock levels, moving-average cost and reversals.
+- **Phase 3 (Purchasing):** suppliers, purchase orders, goods receipts and supplier bills.
 
 ## Requirements
 
@@ -98,6 +102,27 @@ All stock comes from one ledger, **Stock movements**. Every quantity and value y
 - **Stock levels:** a read-only report of quantity and value per item and warehouse.
 - **Delete protection:** items and warehouses that have movements can't be deleted.
 
+## Purchasing (Phase 3)
+
+The flow goes **Purchase orders → Purchase order lines → Send → Goods receipts → Supplier bills**.
+
+1. **Purchase orders:** add a row with Supplier and Deliver to. Leave PO number blank and it is numbered PO-00001, PO-00002, and so on.
+2. **Purchase order lines:** one flat sheet for all orders. Type the PO number, item, qty, and price (leave the price blank to use the item's default cost). Each item can appear once per PO. Use the **Filter** box, or select POs and click **Show lines**, to see one order.
+3. **Send** the PO by selecting it by its row number and clicking **Send**. Its lines are then locked, and on the header only Expected date and Notes can change.
+4. **Goods receipts:** one row per delivery: PO, item, qty, and optionally a warehouse and a delivery note. Each row adds stock at the PO price, as a Receipt in Stock movements, saved together with the receipt.
+   - You can't receive more than is outstanding, even across rows of one paste.
+   - **Receive all** on a PO receives everything outstanding in one go. If any line can't be received, nothing is posted.
+   - Saved receipts are locked. **Reverse** cancels a receipt and its stock together.
+5. **Close** a PO when nothing more is coming. Anything outstanding is cancelled.
+6. **Supplier bills:** bill number, PO and amount.
+   - The supplier and due date (bill date plus the supplier's payment terms) are filled in from the PO.
+   - **Match** compares everything billed on the PO with what was received, and flags differences in amber.
+   - The same bill number from the same supplier can't be entered twice.
+
+**On order** on Items and **Open orders** on Suppliers show what is still to be delivered on sent POs.
+
+Accounting entries for receipts and bills come in Phase 4.
+
 ## What works
 
 | Feature | How |
@@ -113,6 +138,8 @@ All stock comes from one ledger, **Stock movements**. Every quantity and value y
 | Audit log | One record per changed cell (who, when, old → new), written in the same transaction as the change. `GET /api/sheets/items/rows/:id/audit` |
 | Computed columns | Grey and read-only, calculated by the server (e.g. Items · On hand, Avg cost) |
 | Reference columns | Store the row's id, show its SKU or code, and offer a pick list in the cell editor; renaming a SKU never breaks movements |
+| Filter | Type in **Filter…** to show matching rows; separate several terms with commas. Rows you edit stay visible until the filter changes |
+| Status locks | Sheets can lock rows by status (sent POs, their lines). The footer says why a cell can't be edited |
 | Fill handle, copy, row delete | Drag the corner of a selection; Ctrl+C; select rows by their number and press Delete or **Delete row** |
 
 ## Project layout
@@ -121,6 +148,7 @@ All stock comes from one ledger, **Stock movements**. Every quantity and value y
 apps/web          React + Vite. SheetView (Glide Data Grid) + SheetModel (edit queue, undo, saving)
 apps/api          Fastify. Sheet routes, runBatch (validation, references, unique checks, posting rules, audit)
   src/inventory/  Stock math (balances, moving average), posting rules, Stock levels report, Reverse
+  src/purchasing/ PO numbering, Send/Close/Receive all, receipt posting (with stock movements), bill matching
 packages/schema   Sheet definitions, cell parsing, validation, API types. Shared by web and api
 packages/db       SheetStore interface, MongoStore (transactions), MemoryStore (no setup), seed data
 samples/          items-500.tsv for the paste test
@@ -133,7 +161,7 @@ Dockerfile        Builds both images: --target api and --target web
 ## Tests
 
 ```powershell
-pnpm test        # 81 tests: parsing, batch rules, inventory costing and stock checks, and the grid model against the real API
+pnpm test        # 101 tests: parsing, batch rules, inventory costing, purchasing rules, and the grid model against the real API
 pnpm typecheck
 ```
 
@@ -164,9 +192,10 @@ pnpm --filter @erp/api test
 - Ambiguous dates like 03/04/2026 are read as day/month (`DATE_ORDER` in `packages/schema/src/parse.ts`).
 - Undo covers cell edits and pastes, not row deletions. On Stock movements, undo only works before a row saves; after that, use Reverse.
 - Stock is checked per batch against the ledger. Two people posting issues for the same item at the same moment could both pass the check. Phase 5 (multi-user) will add a stored stock table that the database checks as well.
-- Starter data is only added to a brand-new, empty database.
+- Starter data is only added to a brand-new, empty database. To see the purchasing demo on an existing install, run `docker compose down -v`, which **deletes all data**, then start it again.
+- Concurrent changes that depend on the same PO (two receipts, a line edit and Send) are guarded: one saves and the other gets "please retry".
 - The spec named Mongoose; this uses the official MongoDB driver directly instead. Sheet definitions already describe every column, so Mongoose models would repeat them.
 
-## Next: Phase 3 (Purchasing)
+## Next: Phase 4 (Accounting)
 
-Suppliers, purchase orders with line grids, and goods receipts that post Receipt movements automatically, plus supplier bills. Items will also get an *On order* column.
+Chart of accounts, journal entries, automatic posting from receipts, bills, stock adjustments and expense claims, and a trial balance.

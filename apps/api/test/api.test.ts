@@ -126,6 +126,40 @@ describe('deletes and errors', () => {
 
   it('serves sheet definitions', async () => {
     const res = (await app.inject({ method: 'GET', url: '/api/sheets' })).json() as { sheets: { key: string }[] };
-    expect(res.sheets.map((s) => s.key)).toEqual(['items', 'warehouses', 'stockMovements', 'stockLevels']);
+    expect(res.sheets.map((s) => s.key)).toEqual([
+      'items',
+      'warehouses',
+      'stockMovements',
+      'stockLevels',
+      'suppliers',
+      'purchaseOrders',
+      'purchaseOrderLines',
+      'goodsReceipts',
+      'supplierBills',
+    ]);
+  });
+});
+
+describe('all-or-nothing batches (used by Receive all)', () => {
+  it('saves nothing when one row fails', async () => {
+    const { runBatch } = await import('../src/batch.ts');
+    const { itemsSheet } = await import('@erp/schema');
+    const res = await runBatch(
+      store,
+      itemsSheet,
+      {
+        inserts: [
+          { tempId: 'ok', values: item(1) },
+          { tempId: 'bad', values: { ...item(2), unit: 'crate' } },
+        ],
+        updates: [],
+        deletes: [],
+      },
+      'test',
+      { allOrNothing: true },
+    );
+    expect(res.inserted).toEqual([]);
+    expect(res.errors.map((e) => e.ref)).toEqual(['bad']);
+    expect((await rows()).total).toBe(0);
   });
 });

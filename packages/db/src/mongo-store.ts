@@ -1,5 +1,5 @@
 import { type AuditEntry, type CellValue, type Row, type RowsResponse, type SheetDef, uniqueColumns, uniqueKey } from '@erp/schema';
-import { type Db, MongoClient, MongoServerError } from 'mongodb';
+import { type ClientSession, type Db, MongoClient, MongoServerError } from 'mongodb';
 import { type CommitPlan, type CommitResult, ConflictError, DuplicateKeyError, type ListOptions, type SheetStore } from './store.ts';
 
 /** How a row is stored. `_u` holds lower-cased copies of unique columns so the index is case-insensitive. */
@@ -107,65 +107,20 @@ export class MongoStore implements SheetStore {
   }
 
   async commit(plan: CommitPlan): Promise<CommitResult> {
-    const sheet = plan.sheet.key;
-    const col = this.col(sheet);
-    const audit = this.db.collection<AuditDoc>(AUDIT);
     const session = this.client.startSession();
+    let failedSheet = plan.sheet.key;
     try {
       let conflictIds: string[] = [];
       // withTransaction retries on transient errors, so everything inside must start from scratch.
       await session.withTransaction(async () => {
-        conflictIds = [];
-        // Unique indexes are checked on every write, not at commit, so the order matters: first free up
-        // values (deletes, then unique columns being changed), then claim them (updates, then inserts).
-        // That way "delete A + insert A" or "swap two SKUs" in one batch never collides halfway through.
-        for (const d of plan.deletes) {
-          const res = await col.deleteOne({ _id: d.id, version: d.expectedVersion }, { session });
-          if (res.deletedCount === 0 && (await col.countDocuments({ _id: d.id }, { session })) > 0) {
-            conflictIds.push(d.id);
-          }
-        }
-
-        for (const u of plan.updates) {
-          const released = Object.keys(this.uniques(sheet, u.set));
-          if (released.length === 0) continue;
-          const $set = Object.fromEntries(released.map((k) => [`_u.${k}`, null]));
-          await col.updateOne({ _id: u.id, version: u.expectedVersion }, { $set }, { session });
-        }
-
-        for (const u of plan.updates) {
-          const $set: Record<string, unknown> = { updatedAt: new Date(u.updatedAt) };
-          for (const [k, v] of Object.entries(u.set)) $set[`values.${k}`] = v;
-          for (const [k, v] of Object.entries(this.uniques(sheet, u.set))) $set[`_u.${k}`] = v;
-          const res = await col.updateOne({ _id: u.id, version: u.expectedVersion }, { $set, $inc: { version: 1 } }, { session });
-          if (res.matchedCount === 0) conflictIds.push(u.id);
-        }
-
-        if (plan.inserts.length > 0) {
-          await col.insertMany(
-            plan.inserts.map((r) => ({
-              _id: r.id,
-              version: r.version,
-              seq: nextSeq(),
-              values: r.values,
-              _u: this.uniques(sheet, r.values),
-              createdAt: new Date(r.createdAt),
-              updatedAt: new Date(r.updatedAt),
-            })),
-            { session },
-          );
-        }
-
-        // Throwing inside withTransaction aborts it: none of the writes above are kept.
+        failedSheet = plan.sheet.key;
+        conflictIds = await this.write(plan, session);
+        // Throwing inside withTransaction aborts it: none of the writes are kept.
         if (plan.atomic && conflictIds.length > 0) throw new ConflictError(conflictIds);
-
-        const skipped = new Set(conflictIds);
-        const entries = plan.audit.filter((a) => !skipped.has(a.rowId));
-        if (entries.length > 0) {
-          await audit.insertMany(
-            entries.map(({ id, at, ...rest }) => ({ _id: id, at: new Date(at), seq: nextSeq(), ...rest })),
-            { session },
-          );
+        for (const related of plan.related ?? []) {
+          failedSheet = related.sheet.key;
+          const relatedConflicts = await this.write(related, session);
+          if (relatedConflicts.length > 0) throw new ConflictError(relatedConflicts);
         }
       });
       return { conflictIds };
@@ -173,12 +128,68 @@ export class MongoStore implements SheetStore {
       if (err instanceof MongoServerError && err.code === 11000) {
         const pattern = (err as { keyPattern?: Record<string, unknown> }).keyPattern;
         const fromPattern = pattern ? Object.keys(pattern)[0]?.replace(/^_u\./, '') : undefined;
-        throw new DuplicateKeyError(sheet, fromPattern ?? /unique_(\w+)/.exec(err.message)?.[1] ?? 'unknown');
+        throw new DuplicateKeyError(failedSheet, fromPattern ?? /unique_(\w+)/.exec(err.message)?.[1] ?? 'unknown');
       }
       throw err;
     } finally {
       await session.endSession();
     }
+  }
+
+  /** One sheet's writes inside a running transaction. Returns the ids whose version moved on. */
+  private async write(plan: CommitPlan, session: ClientSession): Promise<string[]> {
+    const sheet = plan.sheet.key;
+    const col = this.col(sheet);
+    const conflictIds: string[] = [];
+    // Unique indexes are checked on every write, not at commit, so the order matters: first free up
+    // values (deletes, then unique columns being changed), then claim them (updates, then inserts).
+    // That way "delete A + insert A" or "swap two SKUs" in one batch never collides halfway through.
+    for (const d of plan.deletes) {
+      const res = await col.deleteOne({ _id: d.id, version: d.expectedVersion }, { session });
+      if (res.deletedCount === 0 && (await col.countDocuments({ _id: d.id }, { session })) > 0) {
+        conflictIds.push(d.id);
+      }
+    }
+
+    for (const u of plan.updates) {
+      const released = Object.keys(this.uniques(sheet, u.set));
+      if (released.length === 0) continue;
+      const $set = Object.fromEntries(released.map((k) => [`_u.${k}`, null]));
+      await col.updateOne({ _id: u.id, version: u.expectedVersion }, { $set }, { session });
+    }
+
+    for (const u of plan.updates) {
+      const $set: Record<string, unknown> = { updatedAt: new Date(u.updatedAt) };
+      for (const [k, v] of Object.entries(u.set)) $set[`values.${k}`] = v;
+      for (const [k, v] of Object.entries(this.uniques(sheet, u.set))) $set[`_u.${k}`] = v;
+      const res = await col.updateOne({ _id: u.id, version: u.expectedVersion }, { $set, $inc: { version: 1 } }, { session });
+      if (res.matchedCount === 0) conflictIds.push(u.id);
+    }
+
+    if (plan.inserts.length > 0) {
+      await col.insertMany(
+        plan.inserts.map((r) => ({
+          _id: r.id,
+          version: r.version,
+          seq: nextSeq(),
+          values: r.values,
+          _u: this.uniques(sheet, r.values),
+          createdAt: new Date(r.createdAt),
+          updatedAt: new Date(r.updatedAt),
+        })),
+        { session },
+      );
+    }
+
+    const skipped = new Set(conflictIds);
+    const entries = plan.audit.filter((a) => !skipped.has(a.rowId));
+    if (entries.length > 0) {
+      await this.db.collection<AuditDoc>(AUDIT).insertMany(
+        entries.map(({ id, at, ...rest }) => ({ _id: id, at: new Date(at), seq: nextSeq(), ...rest })),
+        { session },
+      );
+    }
+    return conflictIds;
   }
 
   async listWhere(sheet: string, column: string, values?: readonly string[]): Promise<Row[]> {

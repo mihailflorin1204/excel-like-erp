@@ -1,4 +1,4 @@
-import { DuplicateKeyError, type SheetStore } from '@erp/db';
+import { ConflictError, DuplicateKeyError, type SheetStore } from '@erp/db';
 import { batchRequestSchema, getSheet, sheets } from '@erp/schema';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { runBatch } from './batch.ts';
@@ -46,6 +46,10 @@ export function buildApp(store: SheetStore, options: { logger?: boolean } = {}):
       if (err instanceof DuplicateKeyError) {
         // Another write claimed the same value between our check and the commit. Nothing was saved.
         return reply.code(409).send({ message: `${err.column} must be unique; nothing was saved, please retry` });
+      }
+      if (err instanceof ConflictError) {
+        // A related record (e.g. the PO of a receipt) changed at the same moment. Nothing was saved.
+        return reply.code(409).send({ message: 'Something related changed at the same time; nothing was saved, please retry' });
       }
       throw err;
     }

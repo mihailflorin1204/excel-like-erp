@@ -5,6 +5,8 @@ import {
   type ColumnDef,
   copyText,
   editableColumns,
+  deleteBlockedReason,
+  editBlockedReason,
   isReadOnlyColumn,
   parseCellInput,
   type RefLookup,
@@ -116,9 +118,16 @@ export class SheetModel {
     this.publish();
   }
 
-  /** Saved rows of a ledger, and every row of a report, can't be edited. */
+  /** Saved rows of a ledger, and every row of a report, can't be edited at all. */
   isLocked(row: RowState): boolean {
     return !!this.sheet.virtual || (!!this.sheet.appendOnly && !row.draft);
+  }
+
+  /** Why this cell can't be edited (same rules as the server), or null. New rows only block read-only columns. */
+  blockedReason(row: RowState, column: ColumnDef): string | null {
+    if (this.sheet.virtual) return 'This is a calculated report';
+    if (row.draft) return isReadOnlyColumn(column) ? 'Filled in automatically' : null;
+    return editBlockedReason(this.sheet, row.values, column);
   }
 
   // ---- subscription (useSyncExternalStore) ----
@@ -181,7 +190,8 @@ export class SheetModel {
     for (const edit of edits) {
       const column = this.column(edit.column);
       if (!column || isReadOnlyColumn(column) || this.sheet.virtual) continue;
-      if (this.rows[edit.rowIndex] && this.isLocked(this.rows[edit.rowIndex]!)) continue;
+      const existing = this.rows[edit.rowIndex];
+      if (existing && this.blockedReason(existing, column)) continue;
       const row = this.rowAt(edit.rowIndex);
       touched.add(row.key);
       const parsed = parseCellInput(column, edit.raw, this.options.refs);
@@ -221,13 +231,18 @@ export class SheetModel {
     return this.rows.length - 1;
   }
 
-  /** Deletes rows; locked (posted) rows are skipped. Returns how many were skipped. */
-  deleteRows(indices: readonly number[]): number {
+  /** Deletes rows; rows that can't be deleted (posted, sent…) are skipped. Returns the reasons for those. */
+  deleteRows(indices: readonly number[]): string[] {
     const targets = indices.map((i) => this.rows[i]).filter((r): r is RowState => !!r);
-    const allowed = targets.filter((r) => !this.isLocked(r));
+    const skipped: string[] = [];
+    const allowed = targets.filter((r) => {
+      const reason = r.draft ? null : deleteBlockedReason(this.sheet, r.values);
+      if (reason) skipped.push(reason);
+      return !reason;
+    });
     this.removeRows(new Set(allowed.map((r) => r.key)));
     this.afterEdit();
-    return targets.length - allowed.length;
+    return skipped;
   }
 
   /** Merges rows the server changed or created outside a batch (e.g. by Reverse). */

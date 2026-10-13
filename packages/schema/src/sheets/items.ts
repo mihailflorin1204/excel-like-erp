@@ -14,6 +14,8 @@ export const itemsSheet = defineSheet({
     { key: 'cost', label: 'Default cost', type: 'currency', min: 0, width: 110 },
     { key: 'reorderPoint', label: 'Reorder point', type: 'number', integer: true, min: 0, width: 115 },
     { key: 'onHand', label: 'On hand', type: 'number', computed: true, width: 90 },
+    // Still to be delivered on sent purchase orders.
+    { key: 'onOrder', label: 'On order', type: 'number', computed: true, width: 90 },
     { key: 'avgCost', label: 'Avg cost', type: 'currency', computed: true, width: 95 },
     { key: 'stockValue', label: 'Stock value', type: 'currency', computed: true, width: 110 },
     { key: 'stockStatus', label: 'Status', type: 'text', computed: true, width: 90 },

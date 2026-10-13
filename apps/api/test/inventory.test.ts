@@ -198,9 +198,19 @@ describe('seed data', () => {
     const fresh = new MemoryStore();
     await fresh.init(sheets);
     app = buildApp(fresh);
-    expect(await seedIfEmpty(fresh)).toEqual(['warehouses (2)', 'items (12)', 'stockMovements (9)']);
-    // BOLT-M8: 40 @ 6.20 + 20 @ 6.80 = 60 @ 6.40, then 45 issued → 15 left at 6.40.
-    expect((await item('BOLT-M8')).values).toMatchObject({ onHand: 15, avgCost: 6.4, stockValue: 96, stockStatus: 'Reorder' });
+    expect(await seedIfEmpty(fresh)).toEqual([
+      'warehouses (2)',
+      'items (12)',
+      'stockMovements (9)',
+      'suppliers (3)',
+      'purchaseOrders (2)',
+      'purchaseOrderLines (5)',
+      'goodsReceipts (2)',
+      'supplierBills (1)',
+    ]);
+    // BOLT-M8: 40 @ 6.20 + 20 @ 6.80 = 60 @ 6.40, 45 issued → 15 @ 6.40 (96), then PO-00001 brings 100 @ 6.50.
+    expect((await item('BOLT-M8')).values).toMatchObject({ onHand: 115, stockValue: 746, stockStatus: 'OK', onOrder: 0 });
+    expect((await item('NUT-M8')).values).toMatchObject({ onHand: 100, onOrder: 60 });
     expect((await item('PIPE-CU-15')).values).toMatchObject({ onHand: 120, avgCost: 7.5 });
   });
 });

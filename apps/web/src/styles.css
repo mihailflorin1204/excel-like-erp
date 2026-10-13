@@ -62,3 +62,13 @@ html, body, #root { height: 100%; margin: 0; }
   padding: 4px 2px;
   background: transparent;
 }
+
+.toolbar .filter {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  width: 170px;
+}
+.toolbar .filter:focus { outline: 2px solid #c7d7fe; border-color: var(--accent); }
