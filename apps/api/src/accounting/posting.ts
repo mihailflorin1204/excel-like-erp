@@ -21,16 +21,19 @@ export const ROLES = {
   cogs: { code: '5000', name: 'Cost of goods sold', type: 'Expense', usedFor: 'Stock issues' },
   stockAdjustment: { code: '5100', name: 'Stock adjustments', type: 'Expense', usedFor: 'Stock adjustments' },
   priceVariance: { code: '5200', name: 'Purchase price variance', type: 'Expense', usedFor: 'Bills above the received value' },
+  employeePayable: { code: '2200', name: 'Employee payable', type: 'Liability', usedFor: 'Approved expense claims (control account)' },
+  claimsExpense: { code: '6300', name: 'Travel and expenses', type: 'Expense', usedFor: 'Expense claims without an account' },
 } as const;
 export type Role = keyof typeof ROLES;
 const ROLE_KEYS = Object.keys(ROLES) as Role[];
 export const isRole = (v: CellValue | undefined): v is Role => typeof v === 'string' && v in ROLES;
 
 /** Only their own documents may post to these, so the ledger always agrees with stock and open bills. */
-export const CONTROL_ROLES: readonly Role[] = ['inventory', 'payable'];
+export const CONTROL_ROLES: readonly Role[] = ['inventory', 'payable', 'employeePayable'];
 export const controlMessage: Record<string, string> = {
   inventory: 'Inventory is a control account: change stock in Stock movements instead',
   payable: 'Accounts payable is a control account: use Supplier bills and Supplier payments instead',
+  employeePayable: 'Employee payable is a control account: use Expense claims instead',
 };
 
 /** The rest of the simple generic chart, added only to an empty chart of accounts. */
@@ -38,7 +41,6 @@ const OTHER_ACCOUNTS: { code: string; name: string; type: string }[] = [
   { code: '1100', name: 'Cash', type: 'Asset' },
   { code: '1200', name: 'Accounts receivable', type: 'Asset' },
   { code: '1500', name: 'Equipment', type: 'Asset' },
-  { code: '2200', name: 'Employee payable', type: 'Liability' },
   { code: '2300', name: 'Loans', type: 'Liability' },
   { code: '3000', name: "Owner's equity", type: 'Equity' },
   { code: '3100', name: 'Retained earnings', type: 'Equity' },
@@ -47,7 +49,7 @@ const OTHER_ACCOUNTS: { code: string; name: string; type: string }[] = [
   { code: '6000', name: 'Rent', type: 'Expense' },
   { code: '6100', name: 'Utilities', type: 'Expense' },
   { code: '6200', name: 'Salaries', type: 'Expense' },
-  { code: '6300', name: 'Travel and expenses', type: 'Expense' },
+  { code: '6400', name: 'Office supplies', type: 'Expense' },
   { code: '6900', name: 'Bank charges', type: 'Expense' },
 ];
 
@@ -128,6 +130,8 @@ export interface EntryLine {
   debit?: number;
   credit?: number;
   memo?: string | null;
+  /** Cost centre (a department id). */
+  department?: string | null;
 }
 
 export interface NewEntry {
@@ -180,7 +184,7 @@ export class JournalWriter {
     const lines = e.lines
       .map((l) => {
         const net = money((l.debit ?? 0) - (l.credit ?? 0));
-        return { account: l.account, debit: net > 0 ? net : null, credit: net < 0 ? -net : null, memo: l.memo ?? null };
+        return { account: l.account, debit: net > 0 ? net : null, credit: net < 0 ? -net : null, memo: l.memo ?? null, department: l.department ?? null };
       })
       .filter((l) => l.debit !== null || l.credit !== null);
     if (lines.length === 0) return null;
@@ -209,7 +213,7 @@ export class JournalWriter {
         reversalOf,
         reversedBy: null,
       },
-      lines: lines.map((l) => ({ entry: id, account: l.account, debit: l.debit, credit: l.credit, memo: l.memo })),
+      lines: lines.map((l) => ({ entry: id, account: l.account, debit: l.debit, credit: l.credit, memo: l.memo, department: l.department })),
     });
     return id;
   }
@@ -237,6 +241,7 @@ export class JournalWriter {
         debit: num(l.values.credit) ?? 0,
         credit: num(l.values.debit) ?? 0,
         memo: str(l.values.memo),
+        department: str(l.values.department),
       })),
     });
     if (id) this.markReversed(entry, id);
@@ -348,7 +353,9 @@ export function postMovementEntry(
 }
 
 /** Posted lines with their entry's date, for balances and the trial balance. */
-export async function postedLines(store: SheetStore): Promise<{ account: string; date: string; debit: number; credit: number }[]> {
+export async function postedLines(
+  store: SheetStore,
+): Promise<{ account: string; date: string; debit: number; credit: number; department: string | null }[]> {
   const entries = await store.listWhere(ENTRIES, 'state', ['Posted']);
   if (entries.length === 0) return [];
   const dates = new Map(entries.map((e) => [e.id, String(e.values.date ?? '')]));
@@ -359,5 +366,6 @@ export async function postedLines(store: SheetStore): Promise<{ account: string;
     date: dates.get(String(l.values.entry)) ?? '',
     debit: num(l.values.debit) ?? 0,
     credit: num(l.values.credit) ?? 0,
+    department: str(l.values.department),
   }));
 }

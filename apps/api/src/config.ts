@@ -16,4 +16,8 @@ export const config = {
   host: process.env.API_HOST ?? '127.0.0.1',
   /** Add starter rows to empty sheets on startup (always on for the in-memory store). */
   seedOnStart: process.env.SEED_ON_START === 'true',
+  /** Require sign-in (default). AUTH=off runs everything as one admin called "local", as before Phase 5. */
+  auth: (process.env.AUTH ?? 'on') !== 'off',
+  /** COOKIE_SECURE=true when the app is served over https through a proxy that doesn't say so (X-Forwarded-Proto). */
+  secureCookies: process.env.COOKIE_SECURE === 'true',
 } as const;

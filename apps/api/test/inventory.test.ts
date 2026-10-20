@@ -20,7 +20,7 @@ const reverse = (id: string) => app.inject({ method: 'POST', url: `/api/sheets/s
 beforeEach(async () => {
   store = new MemoryStore();
   await store.init(sheets);
-  app = buildApp(store);
+  app = buildApp(store, { auth: false });
   await batch('warehouses', {
     inserts: [
       { tempId: 'w1', values: { code: 'MAIN', name: 'Main' } },
@@ -197,7 +197,7 @@ describe('seed data', () => {
   it('posts the starter movements with the expected averages', async () => {
     const fresh = new MemoryStore();
     await fresh.init(sheets);
-    app = buildApp(fresh);
+    app = buildApp(fresh, { auth: false });
     expect(await seedIfEmpty(fresh)).toEqual([
       'warehouses (2)',
       'items (12)',
@@ -208,6 +208,9 @@ describe('seed data', () => {
       'goodsReceipts (2)',
       'supplierBills (1)',
       'supplierPayments (1)',
+      'departments (3)',
+      'employees (3)',
+      'expenseClaims (3)',
     ]);
     // BOLT-M8: 40 @ 6.20 + 20 @ 6.80 = 60 @ 6.40, 45 issued → 15 @ 6.40 (96), then PO-00001 brings 100 @ 6.50.
     expect((await item('BOLT-M8')).values).toMatchObject({ onHand: 115, stockValue: 746, stockStatus: 'OK', onOrder: 0 });

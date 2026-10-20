@@ -11,7 +11,7 @@ async function setup() {
   const store = new MemoryStore();
   await store.init(sheets);
   await seedIfEmpty(store);
-  const app = buildApp(store);
+  const app = buildApp(store, { auth: false });
   const get = async (sheet: string) => ((await app.inject({ method: 'GET', url: `/api/sheets/${sheet}/rows` })).json() as { rows: Row[] }).rows;
   const lookups = new RefLookups();
   lookups.set('items', 'sku', await get('items'));

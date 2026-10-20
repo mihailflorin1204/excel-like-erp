@@ -10,7 +10,7 @@ let app: FastifyInstance;
 beforeEach(async () => {
   store = new MemoryStore();
   await store.init(sheets);
-  app = buildApp(store);
+  app = buildApp(store, { auth: false });
 });
 afterEach(async () => {
   await app.close();
@@ -141,6 +141,11 @@ describe('deletes and errors', () => {
       'journalEntries',
       'journalLines',
       'trialBalance',
+      'departments',
+      'employees',
+      'expenseClaims',
+      'departmentCosts',
+      'users',
     ]);
   });
 });

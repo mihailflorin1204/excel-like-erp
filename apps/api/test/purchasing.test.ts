@@ -21,7 +21,7 @@ const item = (sku: string) => find('items', 'sku', sku);
 beforeEach(async () => {
   const store = new MemoryStore();
   await store.init(sheets);
-  app = buildApp(store);
+  app = buildApp(store, { auth: false });
   await insert('warehouses', { code: 'MAIN', name: 'Main' }, { code: 'BXL', name: 'Brussels' });
   await insert(
     'items',

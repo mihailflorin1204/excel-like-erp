@@ -82,6 +82,8 @@ export const journalLinesSheet = defineSheet({
     { key: 'debit', label: 'Debit', type: 'currency', min: 0, width: 110 },
     { key: 'credit', label: 'Credit', type: 'currency', min: 0, width: 110 },
     { key: 'memo', label: 'Memo', type: 'text', maxLength: 200, width: 240 },
+    // Cost centre, for Department costs. Expense claims fill it in from the employee.
+    { key: 'department', label: 'Department', type: 'ref', ref: { sheet: 'departments', display: 'code' }, width: 110 },
     { key: 'date', label: 'Date', type: 'date', computed: true, width: 110 },
     { key: 'status', label: 'Status', type: 'text', computed: true, width: 110 },
     { key: 'entryState', label: 'Entry state', type: 'text', computed: true, hidden: true },

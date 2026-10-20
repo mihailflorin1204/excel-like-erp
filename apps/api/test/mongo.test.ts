@@ -4,7 +4,7 @@
  * Uses (and empties) the database named in the URL, so never point it at your real data.
  */
 import { MongoStore } from '@erp/db';
-import { type BatchRequest, type BatchResponse, sheets } from '@erp/schema';
+import { type BatchRequest, type BatchResponse, internalSheets, sheets } from '@erp/schema';
 import type { FastifyInstance } from 'fastify';
 import { MongoClient } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -22,8 +22,8 @@ describe.skipIf(!url)('MongoStore (real MongoDB)', () => {
     await admin.db().dropDatabase();
     await admin.close();
     store = new MongoStore(url!);
-    await store.init(sheets);
-    app = buildApp(store);
+    await store.init([...sheets, ...internalSheets]);
+    app = buildApp(store, { auth: false });
   });
   afterAll(async () => {
     await app?.close();
@@ -135,5 +135,32 @@ describe.skipIf(!url)('MongoStore (real MongoDB)', () => {
     expect(total.check).toBe('Balanced');
     const bill = (await app.inject({ method: 'GET', url: '/api/sheets/supplierBills/rows' })).json().rows[0].values;
     expect(bill).toMatchObject({ state: 'Posted', status: 'Paid', open: 0 });
+  });
+
+  it('signs in with sessions in the database, posts an expense claim and saves a view', async () => {
+    const secured = buildApp(store);
+    const setup = await secured.inject({ method: 'POST', url: '/api/auth/setup', payload: { email: 'mongo@example.com', name: 'Mongo admin', password: 'correct horse battery' } });
+    expect(setup.statusCode, setup.body).toBe(200);
+    const cookie = String(setup.headers['set-cookie']).split(';')[0]!;
+    const call = (method: 'GET' | 'POST', url: string, payload?: object) => secured.inject({ method, url, headers: { cookie }, ...(payload ? { payload } : {}) });
+    expect((await call('GET', '/api/auth/me')).json().user.email).toBe('mongo@example.com');
+
+    await call('POST', '/api/sheets/departments/batch', { inserts: [{ tempId: 'd', values: { code: 'MDEP', name: 'Mongo dept' } }] });
+    await call('POST', '/api/sheets/employees/batch', { inserts: [{ tempId: 'e', values: { code: 'MEMP', name: 'Someone', department: 'MDEP' } }] });
+    const claim = (await call('POST', '/api/sheets/expenseClaims/batch', { inserts: [{ tempId: 'c', values: { employee: 'MEMP', category: 'Travel', amount: 12.5 } }] })).json();
+    const id = claim.inserted[0].row.id;
+    for (const action of ['submit', 'approve', 'pay']) {
+      const res = await call('POST', `/api/sheets/expenseClaims/rows/${id}/actions/${action}`);
+      expect(res.statusCode, res.body).toBe(200);
+    }
+    const tb = (await call('GET', '/api/sheets/trialBalance/rows')).json();
+    expect(tb.rows.find((r: { id: string }) => r.id === 'total').values.check).toBe('Balanced');
+
+    const view = await call('POST', '/api/views', { sheet: 'items', name: 'Mongo view', config: { query: '', sort: null, hidden: [], frozen: 1, formulas: [] } });
+    expect(view.statusCode, view.body).toBe(200);
+    expect((await call('GET', '/api/views?sheet=items')).json().views.map((v: { name: string }) => v.name)).toEqual(['Mongo view']);
+    await call('POST', '/api/auth/logout');
+    expect((await call('GET', '/api/sheets')).statusCode).toBe(401);
+    await secured.close();
   });
 });

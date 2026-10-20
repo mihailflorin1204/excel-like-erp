@@ -1,6 +1,6 @@
 import { buildApp } from './app.ts';
 import { config } from './config.ts';
-import { seedIfEmpty } from './seed.ts';
+import { addDemoUser, DEMO_USER, seedIfEmpty } from './seed.ts';
 import { openStore } from './store.ts';
 
 const store = await openStore().catch((err: unknown) => {
@@ -15,8 +15,12 @@ if (config.store === 'memory' || config.seedOnStart) {
   if (config.store === 'memory') console.log('In-memory store: data resets on restart.');
   if (seeded.length > 0) console.log(`Seeded starter rows: ${seeded.join(', ')}`);
 }
+if (config.store === 'memory' && config.auth && (await addDemoUser(store))) {
+  console.log(`Sign in with ${DEMO_USER.email} / ${DEMO_USER.password} (in-memory demo only).`);
+}
+if (!config.auth) console.log('Sign-in is switched off (AUTH=off): everyone works as "local".');
 
-const app = buildApp(store, { logger: true });
+const app = buildApp(store, { logger: true, auth: config.auth, secureCookies: config.secureCookies });
 
 const shutdown = async () => {
   await app.close();

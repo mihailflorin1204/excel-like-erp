@@ -1,5 +1,7 @@
 import type { SheetDef } from './types.ts';
 import { accountsSheet, journalEntriesSheet, journalLinesSheet, trialBalanceSheet } from './sheets/accounting.ts';
+import { usersSheet } from './sheets/admin.ts';
+import { departmentCostsSheet, departmentsSheet, employeesSheet, expenseClaimsSheet } from './sheets/hr.ts';
 import { itemsSheet } from './sheets/items.ts';
 import {
   goodsReceiptsSheet,
@@ -29,6 +31,11 @@ export const sheets: readonly SheetDef[] = [
   journalEntriesSheet,
   journalLinesSheet,
   trialBalanceSheet,
+  departmentsSheet,
+  employeesSheet,
+  expenseClaimsSheet,
+  departmentCostsSheet,
+  usersSheet,
 ];
 
 export const getSheet = (key: string): SheetDef | undefined => sheets.find((s) => s.key === key);

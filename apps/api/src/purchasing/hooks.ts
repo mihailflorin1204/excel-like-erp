@@ -14,6 +14,7 @@ import { ActionError, type HookContext, type InsertDraft, type SheetHooks } from
 import {
   auditEntry,
   commitOrConflict,
+  guardStock,
   insertAudit,
   MOVEMENTS,
   num,
@@ -358,6 +359,9 @@ export const purchasingHooks: Record<string, SheetHooks> = {
      */
     async beforeInsert(store, inserts, ctx) {
       const errors: BatchError[] = [];
+      // Claim the items' stock guards before anything reads stock (see guardStock).
+      const guard = await guardStock(store, inserts.map((i) => String(i.values.item)), ctx);
+      ctx.related.push(() => guard);
       const { pos, linesByPo, received } = await loadOrders(store, [...new Set(inserts.map((i) => String(i.values.po)))]);
       const items = byId(await store.getRows('items', [...new Set(inserts.map((i) => String(i.values.item)))]));
       const taken = new Map<string, number>(); // received in this batch per line
@@ -513,7 +517,7 @@ export const purchasingHooks: Record<string, SheetHooks> = {
           audit: [...insertAudit(ctx, RECEIPTS, reversal), auditEntry(ctx, RECEIPTS, original.id, 'update', 'reversedBy', null, reversal.id)],
           atomic: true,
           // Bumping the PO makes a bill being posted on it at the same moment conflict.
-          related: [stock.plan, ...(po ? [touchPlan(purchaseOrdersSheet, [po], ctx.now)] : []), ...journal.plans()],
+          related: [stock.plan, stock.guard, ...(po ? [touchPlan(purchaseOrdersSheet, [po], ctx.now)] : []), ...journal.plans()],
         });
         const updated: Row = { ...original, version: original.version + 1, updatedAt: ctx.now, values: { ...o, reversedBy: reversal.id } };
         return [updated, reversal];

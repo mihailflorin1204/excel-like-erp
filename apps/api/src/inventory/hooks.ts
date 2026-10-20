@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { type CommitPlan, ConflictError, type SheetStore } from '@erp/db';
-import { type BatchError, type CellValue, roundTo, type Row, stockMovementsSheet } from '@erp/schema';
+import { type BatchError, type CellValue, roundTo, type Row, stockGuardsSheet, stockMovementsSheet } from '@erp/schema';
 import { ActionError, type SheetHooks } from '../hooks.ts';
-import { auditEntry, fmtQty, insertAudit, num, type PostingContext, str, today } from '../util.ts';
+import { auditEntry, fmtQty, insertAudit, newRow, num, type PostingContext, str, today, touchPlan } from '../util.ts';
 import { type JournalWriter, journalFor, journalWriter, postMovementEntry } from '../accounting/posting.ts';
 import { applyMovement, averageCost, binQty, buildStock, itemQty, type StockState } from './stock.ts';
 
@@ -10,6 +10,21 @@ export const MOVEMENTS = 'stockMovements';
 const COST_DIGITS = 4;
 
 export { auditEntry, fmtQty, insertAudit, num, type PostingContext, str, today } from '../util.ts';
+
+/**
+ * Claims the items' stock guard rows: bumps them (or creates them) in the same transaction as the movements.
+ * Read before the stock is read, so a movement of the same item saved in between makes this save conflict
+ * (it is then retried and sees the new stock) instead of both passing the stock check.
+ */
+export async function guardStock(store: SheetStore, itemIds: readonly string[], ctx: PostingContext): Promise<CommitPlan> {
+  const wanted = [...new Set(itemIds)];
+  const existing = wanted.length ? await store.listWhere(stockGuardsSheet.key, 'item', wanted) : [];
+  const have = new Set(existing.map((r) => String(r.values.item)));
+  return {
+    ...touchPlan(stockGuardsSheet, existing, ctx.now),
+    inserts: wanted.filter((i) => !have.has(i)).map((item) => newRow(ctx, { item })),
+  };
+}
 
 export async function stockFor(store: SheetStore, itemIds: readonly string[]): Promise<StockState> {
   return buildStock(await store.listWhere(MOVEMENTS, 'item', itemIds));
@@ -113,8 +128,9 @@ export async function planMovementReversal(
   source: string | null,
   /** Receives the reversal of the movement's journal entry. */
   journal: JournalWriter,
-): Promise<{ plan: CommitPlan; reversal: Row; updated: Row }> {
+): Promise<{ plan: CommitPlan; guard: CommitPlan; reversal: Row; updated: Row }> {
   const o = original.values;
+  const guard = await guardStock(store, [String(o.item)], ctx);
   if (str(o.reversedBy)) throw new ActionError(409, 'This movement is already reversed');
   if (str(o.reversalOf)) throw new ActionError(409, 'This is a reversal; post a new movement instead');
   if (str(o.source) !== source) {
@@ -201,7 +217,7 @@ export async function planMovementReversal(
     atomic: true,
   };
   const updated: Row = { ...original, version: original.version + 1, updatedAt: ctx.now, values: { ...o, ...originalSet } };
-  return { plan, reversal, updated };
+  return { plan, guard, reversal, updated };
 }
 
 export async function skusOf(store: SheetStore, itemIds: readonly string[]): Promise<Map<string, string | null>> {
@@ -224,8 +240,8 @@ async function reverseMovement(store: SheetStore, id: string, user: string): Pro
   if (!original) throw new ActionError(404, 'Movement not found');
   const ctx = { user, now: new Date().toISOString(), batchId: randomUUID() };
   const journal = await journalWriter(store, ctx);
-  const { plan, reversal, updated } = await planMovementReversal(store, original, ctx, null, journal);
-  await commitOrConflict(store, { ...plan, related: journal.plans() });
+  const { plan, guard, reversal, updated } = await planMovementReversal(store, original, ctx, null, journal);
+  await commitOrConflict(store, { ...plan, related: [guard, ...journal.plans()] });
   return [updated, reversal];
 }
 
@@ -251,6 +267,8 @@ export const inventoryHooks: Record<string, SheetHooks> = {
   stockMovements: {
     /** Costs and checks the movements, then posts each one's journal entry in the same transaction. */
     async beforeInsert(store, inserts, ctx) {
+      const guard = await guardStock(store, inserts.map((i) => String(i.values.item)), ctx);
+      ctx.related.push(() => guard);
       const errors = await postMovements(store, inserts);
       const failed = new Set(errors.map((e) => e.ref));
       const ok = inserts.filter((i) => !failed.has(i.tempId));

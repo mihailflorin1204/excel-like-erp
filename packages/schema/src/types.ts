@@ -4,7 +4,7 @@ export type ColumnType = 'text' | 'number' | 'currency' | 'date' | 'enum' | 'ref
 /** What a single cell holds once parsed: text, a number, an ISO date string, or empty. */
 export type CellValue = string | number | null;
 
-export type ModuleKey = 'inventory' | 'purchasing' | 'accounting' | 'hr';
+export type ModuleKey = 'inventory' | 'purchasing' | 'accounting' | 'hr' | 'admin';
 
 export interface ColumnDef {
   key: string;
@@ -83,6 +83,10 @@ export interface SheetDef {
    * The grid waits for it before saving a new row.
    */
   requireOneOf?: readonly (readonly string[])[];
+  /** Only admins can see or change it (e.g. Users). */
+  adminOnly?: boolean;
+  /** Kept by the server for itself; never served through the sheet routes. */
+  internal?: boolean;
   /** For virtual (report) sheets: date inputs shown above the grid and sent as query parameters (e.g. from / to). */
   params?: readonly { key: string; label: string }[];
 }

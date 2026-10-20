@@ -8,7 +8,7 @@ import { type BatchApi, SheetModel } from './sheet-model.ts';
 async function setup() {
   const store = new MemoryStore();
   await store.init(sheets);
-  const app = buildApp(store);
+  const app = buildApp(store, { auth: false });
   const calls: BatchRequest[] = [];
   let gate: Promise<void> | null = null;
   const api: BatchApi & { hold(): () => void } = {

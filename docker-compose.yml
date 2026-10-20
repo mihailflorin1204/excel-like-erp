@@ -42,6 +42,8 @@ services:
       API_PORT: "3001"
       # Adds the starter items and warehouses to empty sheets. Set to "false" once you have real data.
       SEED_ON_START: ${SEED_ON_START:-true}
+      # Sign-in. The first person to open the app creates the admin account.
+      AUTH: ${AUTH:-on}
     # No ports published: only the web container talks to the API.
 
   web:

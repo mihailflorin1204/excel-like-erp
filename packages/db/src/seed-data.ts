@@ -56,10 +56,29 @@ export const seedData: Record<string, Record<string, CellValue>[]> = {
   supplierBills: [{ billNo: 'F-2026-1187', po: 'PO-00001', date: '2026-10-11', amount: 772 }],
   // seed.ts posts the bill before paying part of it.
   supplierPayments: [{ date: '2026-10-12', supplier: 'FAST', billNo: 'F-2026-1187', amount: 500, reference: 'Bank transfer' }],
+  departments: [
+    { code: 'OPS', name: 'Operations' },
+    { code: 'SALES', name: 'Sales' },
+    { code: 'ADM', name: 'Administration' },
+  ],
+  employees: [
+    { code: 'LJ', name: 'Lotte Janssens', email: 'lotte@example.com', department: 'OPS', title: 'Warehouse lead', startDate: '2024-03-01' },
+    { code: 'TC', name: 'Tom Claes', email: 'tom@example.com', department: 'SALES', title: 'Account manager', startDate: '2025-01-15' },
+    { code: 'SE', name: 'Sara El Amrani', email: 'sara@example.com', department: 'ADM', title: 'Office manager', startDate: '2023-09-04' },
+  ],
+  // seed.ts submits all three, approves the first two and pays the first.
+  expenseClaims: [
+    { number: 'EC-00001', employee: 'LJ', date: '2026-10-02', category: 'Travel', description: 'Train to supplier visit, Gent', amount: 84.5 },
+    { number: 'EC-00002', employee: 'TC', date: '2026-10-06', category: 'Meals', description: 'Client lunch', amount: 42 },
+    { number: 'EC-00003', employee: 'SE', date: '2026-10-09', category: 'Supplies', description: 'Printer paper', amount: 19.99, account: '6400' },
+  ],
 };
 
-/** Actions run during seeding, before the sheet named in `before` is filled. */
-export const seedActions: { before: string; sheet: string; match: { column: string; value: string }; action: string }[] = [
+/** Actions run during seeding, before the sheet named in `before` is filled (or after the one in `after`). */
+export const seedActions: { before?: string; after?: string; sheet: string; match: { column: string; value: string }; action: string }[] = [
   { before: 'goodsReceipts', sheet: 'purchaseOrders', match: { column: 'number', value: 'PO-00001' }, action: 'send' },
   { before: 'supplierPayments', sheet: 'supplierBills', match: { column: 'billNo', value: 'F-2026-1187' }, action: 'post' },
+  ...['EC-00001', 'EC-00002', 'EC-00003'].map((value) => ({ after: 'expenseClaims', sheet: 'expenseClaims', match: { column: 'number', value }, action: 'submit' })),
+  ...['EC-00001', 'EC-00002'].map((value) => ({ after: 'expenseClaims', sheet: 'expenseClaims', match: { column: 'number', value }, action: 'approve' })),
+  { after: 'expenseClaims', sheet: 'expenseClaims', match: { column: 'number', value: 'EC-00001' }, action: 'pay' },
 ];

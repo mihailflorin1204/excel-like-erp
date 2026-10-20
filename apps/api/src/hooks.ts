@@ -2,6 +2,8 @@ import type { CommitPlan, SheetStore } from '@erp/db';
 import type { BatchError, CellValue, Row } from '@erp/schema';
 import { inventoryHooks } from './inventory/hooks.ts';
 import { accountingHooks } from './accounting/hooks.ts';
+import { adminHooks } from './admin/hooks.ts';
+import { hrHooks } from './hr/hooks.ts';
 import { payablesHooks } from './purchasing/payables.ts';
 import { purchasingHooks } from './purchasing/hooks.ts';
 
@@ -53,8 +55,11 @@ export interface SheetHooks {
   beforeDelete?: (store: SheetStore, rows: Row[], ctx: HookContext) => Promise<BatchError[]>;
   /** Rows of a virtual (report) sheet. `params` holds the sheet's declared params (e.g. from / to dates). */
   virtualRows?: (store: SheetStore, params: Record<string, string>) => Promise<Row[]>;
-  /** Row actions such as Reverse. Return the rows created or changed. */
-  actions?: Record<string, (store: SheetStore, rowId: string, user: string) => Promise<Row[]>>;
+  /**
+   * Row actions such as Reverse. Return the rows created or changed, optionally with a message for the person
+   * who clicked (e.g. a temporary password).
+   */
+  actions?: Record<string, (store: SheetStore, rowId: string, user: string) => Promise<Row[] | { rows: Row[]; message: string }>>;
 }
 
 export const hooks: Record<string, SheetHooks> = {
@@ -62,6 +67,8 @@ export const hooks: Record<string, SheetHooks> = {
   ...purchasingHooks,
   ...payablesHooks,
   ...accountingHooks,
+  ...hrHooks,
+  ...adminHooks,
 };
 
 export async function applyComputed(store: SheetStore, sheet: string, rows: Row[]): Promise<Row[]> {

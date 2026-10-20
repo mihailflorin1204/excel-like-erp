@@ -1,19 +1,17 @@
 import type { SheetDef } from '@erp/schema';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { api } from './api.ts';
+import { api, type CurrentUser } from './api.ts';
+import { AuthGate, UserMenu } from './Auth.tsx';
 import { SheetView } from './SheetView.tsx';
 
-/** Sheets planned for later phases, shown greyed out so the roadmap is visible in the app. */
-const upcoming: { module: string; phase: number; sheets: string[] }[] = [
-  { module: 'HR', phase: 5, sheets: ['Departments', 'Employees', 'Expense claims'] },
-];
 
 const moduleLabel: Record<SheetDef['module'], string> = {
   inventory: 'Inventory',
   purchasing: 'Purchasing',
   accounting: 'Accounting',
   hr: 'HR',
+  admin: 'Admin',
 };
 
 /** `#/purchaseOrderLines?q=PO-00001` → sheet key and filter text. */
@@ -23,6 +21,10 @@ const parseHash = () => {
 };
 
 export function App() {
+  return <AuthGate>{(user, authEnabled) => <Workspace user={user} authEnabled={authEnabled} />}</AuthGate>;
+}
+
+function Workspace({ user, authEnabled }: { user: CurrentUser; authEnabled: boolean }) {
   const sheetsQuery = useQuery({ queryKey: ['sheets'], queryFn: api.sheets });
   const [route, setRoute] = useState(parseHash);
   const active = route.sheet;
@@ -35,7 +37,7 @@ export function App() {
 
   const sheets = sheetsQuery.data ?? [];
   const current = sheets.find((s) => s.key === active) ?? sheets[0];
-  const modules = [...new Set([...sheets.map((s) => moduleLabel[s.module]), ...upcoming.map((u) => u.module)])];
+  const modules = [...new Set(sheets.map((s) => moduleLabel[s.module]))];
 
   return (
     <div className="app">
@@ -54,18 +56,10 @@ export function App() {
                     </a>
                   </li>
                 ))}
-              {upcoming
-                .filter((u) => u.module === m)
-                .flatMap((u) =>
-                  u.sheets.map((name) => (
-                    <li key={name} className="upcoming" title={`Coming in phase ${u.phase}`}>
-                      {name} <span>P{u.phase}</span>
-                    </li>
-                  )),
-                )}
             </ul>
           </section>
         ))}
+        <UserMenu user={user} authEnabled={authEnabled} />
       </nav>
       <main className="main">
         {sheetsQuery.isError && (

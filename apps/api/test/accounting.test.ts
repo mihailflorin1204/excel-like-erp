@@ -56,7 +56,7 @@ async function trialBalance(query = '') {
 beforeEach(async () => {
   store = new MemoryStore();
   await store.init(sheets);
-  app = buildApp(store);
+  app = buildApp(store, { auth: false });
   await insert('warehouses', { code: 'MAIN', name: 'Main' }, { code: 'BXL', name: 'Brussels' });
   await insert('items', { sku: 'A', name: 'Item A', unit: 'pcs', cost: 5 }, { sku: 'B', name: 'Item B', unit: 'pcs' });
   await insert('suppliers', { code: 'SUP', name: 'Supplier', paymentTermsDays: 30 }, { code: 'OTHER', name: 'Other' });
@@ -73,7 +73,7 @@ describe('chart of accounts', () => {
   it('is created on first start with the posting accounts', async () => {
     const accounts = await rows('accounts');
     expect(accounts.map((a) => a.values.code)).toEqual([
-      '1000', '1100', '1200', '1300', '1500', '2000', '2100', '2200', '2300', '3000', '3100', '3900', '4000', '4900', '5000', '5100', '5200', '6000', '6100', '6200', '6300', '6900',
+      '1000', '1100', '1200', '1300', '1500', '2000', '2100', '2200', '2300', '3000', '3100', '3900', '4000', '4900', '5000', '5100', '5200', '6000', '6100', '6200', '6300', '6400', '6900',
     ]);
     expect(accounts.find((a) => a.values.code === '1300')!.values).toMatchObject({ name: 'Inventory', type: 'Asset', role: 'inventory', balance: 0 });
     expect(accounts.find((a) => a.values.code === '1100')!.values.usedFor).toBeNull();
@@ -105,7 +105,7 @@ describe('chart of accounts', () => {
     await backfillJournal(fresh);
     const accounts = await fresh.listWhere('accounts', 'code');
     // Only the posting accounts are added (no full chart), the existing 1300 is reused.
-    expect(accounts).toHaveLength(8);
+    expect(accounts).toHaveLength(10);
     expect(accounts.find((a) => a.values.code === '1300')!.values).toMatchObject({ name: 'My stock', role: 'inventory' });
     expect(accounts.find((a) => a.values.role === 'payable')!.values.code).toBe('2000');
     expect(accounts.find((a) => a.values.code === '2000')!.values.role).toBe('payable');
@@ -568,7 +568,7 @@ describe('demo data', () => {
     await fresh.init(sheets);
     await seedIfEmpty(fresh);
     store = fresh;
-    app = buildApp(fresh);
+    app = buildApp(fresh, { auth: false });
     const b = await bill('F-2026-1187');
     expect(b.values).toMatchObject({ state: 'Posted', paid: 500, open: 272 });
     expect((await trialBalance()).total.check).toBe('Balanced');
@@ -595,6 +595,29 @@ function interrupted(base: MemoryStore, sheet: string, n: number, meanwhile: () 
 }
 
 describe('saves that land at the same moment', () => {
+  it('two issues of the last unit at the same moment: one is saved, the other sees there is no stock left', async () => {
+    // Zero cost, so no journal entries: the two saves can't clash on an entry number, only the stock guard stops them.
+    await insert('stockMovements', { type: 'Receipt', item: 'A', warehouse: 'MAIN', qty: 1, unitCost: 0 });
+    const issue = { updates: [], deletes: [], inserts: [{ tempId: 'a', values: { type: 'Issue', item: 'A', warehouse: 'MAIN', qty: 1 } }] };
+    // The other issue saves after this one has read the stock (the 2nd read of items comes right after it).
+    const racing = interrupted(store, 'items', 2, () => runBatch(store, getSheet('stockMovements')!, issue, 'other'));
+    const res = (await buildApp(racing, { auth: false }).inject({ method: 'POST', url: '/api/sheets/stockMovements/batch', payload: issue })).json() as BatchResponse;
+    expect(res.inserted).toEqual([]);
+    expect(res.errors.map((e) => e.message)).toEqual(['Only 0 in stock in MAIN']);
+    expect((await rows('items')).find((i) => i.values.sku === 'A')!.values.onHand).toBe(0);
+  });
+
+  it('a reversal and an issue of the same stock at the same moment can not both pass', async () => {
+    const receipt = await insert('stockMovements', { type: 'Receipt', item: 'A', warehouse: 'MAIN', qty: 1, unitCost: 4 });
+    const racing = interrupted(store, 'warehouses', 1, () =>
+      runBatch(store, getSheet('stockMovements')!, { updates: [], deletes: [], inserts: [{ tempId: 'x', values: { type: 'Issue', item: 'A', warehouse: 'MAIN', qty: 1 } }] }, 'other'),
+    );
+    const res = await buildApp(racing, { auth: false }).inject({ method: 'POST', url: `/api/sheets/stockMovements/rows/${receipt.inserted[0]!.row.id}/actions/reverse` });
+    expect(res.statusCode).toBe(409);
+    expect((await rows('items')).find((i) => i.values.sku === 'A')!.values.onHand).toBe(0);
+    expect(await balances()).toEqual({ '3900': -4, '5000': 4 });
+  });
+
   it('a line edit racing Post is rejected, so a posted entry can never become unbalanced', async () => {
     const entry = (await insert('journalEntries', { memo: 'x' })).inserted[0]!.row;
     const lines = await insert('journalLines', { entry: 'JE-00001', account: '1000', debit: 10 }, { entry: 'JE-00001', account: '3000', credit: 10 });
@@ -619,7 +642,7 @@ describe('saves that land at the same moment', () => {
     const gr = await insert('goodsReceipts', { po: 'PO-00001', item: 'A', qty: 5 });
     await insert('supplierBills', { billNo: 'F-1', po: 'PO-00001', amount: 20 });
     const draft = await bill('F-1');
-    const racing = buildApp(interrupted(store, 'suppliers', 1, () => hooks.goodsReceipts!.actions!.reverse!(store, gr.inserted[0]!.row.id, 'other')));
+    const racing = buildApp(interrupted(store, 'suppliers', 1, () => hooks.goodsReceipts!.actions!.reverse!(store, gr.inserted[0]!.row.id, 'other')), { auth: false });
     const res = await racing.inject({ method: 'POST', url: `/api/sheets/supplierBills/rows/${draft.id}/actions/post` });
     // Nothing of the first try is saved; the retry sees the receipt gone and refuses.
     expect(res.statusCode).toBe(409);
